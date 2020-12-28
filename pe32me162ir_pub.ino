@@ -5,7 +5,9 @@
  * - ISKRA ME-162 electronic meter with optical port
  * - (ESP8266MOD+Wifi)
  * - a digital IR-transceiver from https://wiki.hal9k.dk/projects/kamstrup
+ *   (NOTE: be sure to flip/check the order of the two BC547 transistors!)
  * - attach PIN10<->RX, PIN9<->TX, 3VC<->VCC, GND<->GND
+ *   (either 5V or 3.3V seems to be okay)
  *
  * Building:
  * - FIXME
@@ -16,9 +18,10 @@
  * TODO:
  * - Fix RX/TX ports;
  * - make it work with ESP;
- * - fix delta calculations;
  * - actually PUSH something instead of saying yea yea yea;
- * - clean up duplicate code/states with 1.8.0/2.8.0
+ * - clean up duplicate code/states with 1.8.0/2.8.0;
+ * - can we get the device to poke us? / more granular Watts
+ * - fix another low mem warning (probably goes when we remove lastState debug)
  */
 
 /* Serial connection for debugging. Don't increase this, it seems to
@@ -91,6 +94,7 @@ static int din_66219_bcc(const char *s);
 static void on_hello(const char *data, size_t end, State st);
 static void on_data_readout(const char *data, size_t end);
 static void on_response(const char *data, size_t end, State st);
+static void on_push();
 
 /* ASCII control codes */
 const char C_SOH = '\x01';
@@ -124,6 +128,7 @@ public:
 CustomSoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
 
 State state, nextState;
+unsigned long lastStateChange;
 
 size_t recvBufPos;
 const int recvBufSize = 1023;
@@ -131,10 +136,10 @@ char recvBuf[recvBufSize + 1];
 
 char deviceHello[16];
 
-long curValue[2];
-long curTime[2];
-long prevValue[2];
-long prevTime[2];
+long deltaValue[2] = {-1, -1};
+long deltaTime[2] = {-1, -1};
+long lastValue[2] = {-1, -1};
+long lastTime[2] = {-1, -1};
 
 
 void setup()
@@ -148,6 +153,7 @@ void setup()
   pinMode(PIN_IR_TX, OUTPUT);
 
   state = nextState = STATE_START;
+  lastStateChange = millis();
   delay(1000);
   Serial.println("pe32iskra_pub: ISKRA ME-162 publisher");
 }
@@ -305,13 +311,17 @@ void loop()
 
   /* Continuous: push data to remote */
   case STATE_PUSH:
-    Serial.print(F("push time yea yea yea"));
+    on_push();
     nextState = STATE_SLEEP;
     break;
 
   /* Continuous: sleep a while before data fetch */
   case STATE_SLEEP:
-    delay(3000);
+    /* We need to sleep a lot, or else the Watt guestimate makes no sense
+     * for low Wh deltas. For 550W, we'll still only get 9.17 Wh per minute,
+     * so we'd oscillate between 9 (540W) and 10 (600W). */
+    // FIXME: can we get the device to poke us?
+    delay(60000);
     nextState = STATE_REQUEST_1_8_0;
     break;
 
@@ -325,6 +335,16 @@ void loop()
     Serial.print(F(" -> "));
     Serial.println(nextState, DEC);
     state = nextState;
+    lastStateChange = millis();
+  } else if (state != STATE_SLEEP &&
+      (millis() - lastStateChange) > 15000) {
+    Serial.print("millis:");
+    Serial.print(millis(), DEC);
+    Serial.print(", lastStateChange:");
+    Serial.print(lastStateChange, DEC);
+    Serial.print(", diff:");
+    Serial.println((millis() - lastStateChange), DEC);
+    nextState = STATE_START;
   }
 }
 
@@ -386,16 +406,49 @@ static void on_response(const char *data, size_t end, State st)
   Serial.print(st == STATE_EXPECT_1_8_0 ? "1.8.0" : "2.8.0");
   Serial.print(F("]: "));
   Serial.println(data);
+
   if (end == 17 && data[0] == '(' && data[8] == '.' &&
       memcmp(data + 12, "*kWh)", 5) == 0) {
-    unsigned wh = atoi(data + 1) * 1000 + atoi(data + 9);
+    long curValue = atol(data + 1) * 1000 + atol(data + 9);
     int idx = (st == STATE_EXPECT_1_8_0 ? 0 : 1);
-    if (curValue[idx] >= 0) {
-      // FIXME: calculate delta
+
+    /* > This number will overflow (go back to zero), after approximately
+     * > 50 days.
+     * So, we'll do it sooner, but make sure we know about it. */
+    long curTime = (millis() & 0x3fffffffL);
+
+    if (lastValue[idx] >= 0) {
+      deltaValue[idx] = (curValue - lastValue[idx]);
+      deltaTime[idx] = (curTime - lastTime[idx]);
+      if (deltaValue[idx] < 0 || deltaTime[idx] < 0) {
+        deltaValue[idx] = deltaTime[idx] = -1;
+      }
+    } else {
+      deltaValue[idx] = deltaTime[idx] = -1;
     }
-    prevTime[idx] = millis();
-    prevValue[idx] = curValue[idx];
+    lastValue[idx] = curValue;
+    lastTime[idx] = curTime;
   }
+}
+
+void on_push()
+{
+  Serial.print("pushing device: ");
+  Serial.println(deviceHello);
+  for (int idx = 0; idx < 2; ++idx) {
+    if (lastValue[idx] >= 0) {
+      Serial.print("pushing value: ");
+      Serial.println(lastValue[idx]);
+    }
+    if (deltaTime[idx] > 0) {
+      // (Wh * 3600) == Ws; (Tms / 1000) == Ts; W == Ws / T
+      float watt = (deltaValue[idx] * 3600.0) / (deltaTime[idx] / 1000.0);
+      Serial.print("pushing watt: ");
+      Serial.println(watt);
+    }
+  }
+  Serial.print("pushing uptime: ");
+  Serial.println(millis());
 }
 
 /**
@@ -454,16 +507,29 @@ static void test_din_66219_bcc()
 int main()
 {
   test_din_66219_bcc();
+  on_hello("ISK5ME162-0033", 14, STATE_EXPECT_HELLO);
+  on_response("(0032826.545*kWh)", 17, STATE_EXPECT_1_8_0);
+  printf("%ld - %ld - %ld\n",
+    lastValue[0], deltaValue[0], deltaTime[0]);
+  on_response("(0032826.554*kWh)", 17, STATE_EXPECT_1_8_0);
+  printf("%ld - %ld - %ld\n",
+    lastValue[0], deltaValue[0], deltaTime[0]);
+  on_push();
   return 0;
 }
 
 void delay(unsigned long) {}
-unsigned long millis() { return 0; }
+unsigned long millis() { static int m = 50000; return (m += 60000); }
 void pinMode(uint8_t pin, uint8_t mode) {}
-size_t Print::print(char const*) { return 0; }
-size_t Print::print(int, int) { return 0; }
-size_t Print::println(char const*) { return 0; }
-size_t Print::println(int, int) { return 0; }
+size_t Print::print(char const *p) { printf("%s", p); return 0; }
+size_t Print::print(int p, int) { printf("%d", p); return 0; }
+size_t Print::print(long p, int) { printf("%ld", p); return 0; }
+size_t Print::print(unsigned long p, int) { printf("%lu", p); return 0; }
+size_t Print::println(char const *p) { printf("%s\n", p); return 0; }
+size_t Print::println(double p, int) { printf("%f\n", p); return 0; }
+size_t Print::println(int p, int) { printf("%d\n", p); return 0; }
+size_t Print::println(long p, int) { printf("%ld\n", p); return 0; }
+size_t Print::println(unsigned long p, int) { printf("%lu\n", p); return 0; }
 
 HardwareSerial::HardwareSerial(
   volatile uint8_t *ubrrh, volatile uint8_t *ubrrl,
