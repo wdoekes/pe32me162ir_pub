@@ -1,4 +1,5 @@
 #CXX = /snap/arduino/current/hardware/tools/avr/bin/avr-gcc
+#CXX = $(HOME)/snap/arduino/current/.arduino15/packages/esp8266/tools/xtensa-lx106-elf-gcc/2.5.0-4-b40a506/bin/xtensa-lx106-elf-gcc
 CXX = g++
 
 # /snap/arduino/current/hardware/arduino/avr/boards.txt:
@@ -13,7 +14,6 @@ CXXFLAGS = \
     -I/snap/arduino/current/hardware/tools/avr/avr/include \
     -I/snap/arduino/current/hardware/arduino/avr/cores/arduino \
     -I/snap/arduino/current/hardware/arduino/avr/variants/standard \
-    -I$(HOME)/Arduino/libraries/CustomSoftwareSerial
 
 test: pe32me162ir_pub.test
 	./pe32me162ir_pub.test

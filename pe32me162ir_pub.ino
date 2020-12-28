@@ -9,8 +9,10 @@
  * - attach PIN10<->RX, PIN9<->TX, 3VC<->VCC, GND<->GND
  *   (either 5V or 3.3V seems to be okay)
  *
- * Building:
- * - FIXME
+ * Dependencies:
+ * - (for ESP8266) board: package_esp8266com_index.json
+ * - (for ESP8266) library: ArduinoMqttClient
+ * - (for Arduino) library (manually): CustomSoftwareSerial (by ledongthuc)
  *
  * Configuration:
  * - FIXME
@@ -36,6 +38,47 @@ const int PIN_IR_RX = 10; // connect to digital pin 10
 const int PIN_IR_TX = 9;  // connect to digital pin 9
 //const int PIN_LED = 13; // standard Arduino Led
 
+#include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
+
+/* MQTT/Wifi notes:
+ * - does not work with the Arduino Uno */
+
+#if defined(ARDUINO_ARCH_ESP8266)
+# include <ArduinoMqttClient.h>
+# include <ESP8266WiFi.h>
+# include <SoftwareSerial.h>
+#elif defined(ARDUINO_ARCH_AVR)
+# include <CustomSoftwareSerial.h>
+# define SoftwareSerial CustomSoftwareSerial
+# define SWSERIAL_7E1 CSERIAL_7E1
+#elif defined(TEST_BUILD)
+  const int SWSERIAL_7E1 = 0;
+  class SoftwareSerial {
+  public:
+    SoftwareSerial(int, int, bool) {};
+    void begin(long, unsigned short) {}
+    int available() { return true; }
+    void print(char const *) {}
+    int read() { return 0; }
+  };
+# undef F
+# define F(x) x
+#else
+# error Unsupported platform
+#endif
+
+/* In config.h, you should have:
+const char wifi_ssid[] = "<ssid>";
+const char wifi_password[] = "<password>";
+const char mqtt_broker[] = "192.168.1.2";
+const int  mqtt_port = 1883;
+const char mqtt_topic[] = "some/topic";
+*/
+#include "config.h"
+
+#define VERSION "v0"
+//#define DEBUG
+
 /* ISKRA ME-162 notes:
  * > The optical port complies with the IEC 62056-21 (IEC
  * > 61107) standard, a mode C protocol is employed;
@@ -49,25 +92,6 @@ const int PIN_IR_TX = 9;  // connect to digital pin 9
  * > may switch baud rate ... may enter programming mode and]
  * > allows manufacturer-specific [extensions].
  * [ github.com/lvzon/dsmr-p1-parser/blob/master/doc/IEC-62056-21-notes.md ] */
-
-/* Common includes */
-#include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
-
-/* We need a CustomSoftwareSerial because:
- * - the Arduino Uno Hardware Serial does not support baud below 1200;
- * - communication starts with 300 baud;
- * - using SoftwareSerial allows for easy debug using Serial;
- * - regular SoftwareSerial does only SERIAL_8N1 (8bit, no parity, 1 stop bit)
- * - we require SERIAL_7E1 (7bit, even parity, 1 stop bit)
- * [ github.com/ledongthuc/CustomSoftwareSerial ] */
-#ifndef TEST_BUILD
-# include <CustomSoftwareSerial.h>
-#endif
-
-#ifdef TEST_BUILD
-# undef F
-# define F(x) x
-#endif
 
 enum State {
   STATE_START = 0,
@@ -86,6 +110,10 @@ enum State {
   STATE_PUSH,
   STATE_SLEEP
 };
+
+/* We use the guid to store something unique to identify the device by.
+ * For now, we'll populate it with the ESP8266 Wifi MAC address. */
+static char guid[24]; // "EUI48:11:22:33:44:55:66"
 
 /* Calculate and (optionally) check block check character (BCC) */
 static int din_66219_bcc(const char *s);
@@ -108,24 +136,18 @@ const char C_ACK = '\x06';
 const char C_NAK = '\x15';
 #define S_NAK "\x15"
 
-#ifdef TEST_BUILD
-const int CSERIAL_7E1 = 0;
-class CustomSoftwareSerial {
-public:
-  CustomSoftwareSerial(int, int, bool) {};
-  void begin(long, unsigned short) {}
-  int available() { return true; }
-  void print(char const *) {}
-  int read() { return 0; }
-};
-#endif
-
-/* We need a CustomSoftwareSerial because the Arduino Uno does not do
+/* We need a (Custom)SoftwareSerial because the Arduino Uno does not do
  * 300 baud. Once we get up to speed, we could use the HardwareSerial
  * instead. (But we don't, right now.)
+ * - the Arduino Uno Hardware Serial does not support baud below 1200;
+ * - communication starts with 300 baud;
+ * - using SoftwareSerial allows for easy debug using HardwareSerial (USB);
+ * - Arduino SoftwareSerial does only SERIAL_8N1 (8bit, no parity, 1 stop bit)
+ *   (so we use CustomSoftwareSerial; for ESP8266 it's called SoftwareSerial)
+ * - we require SERIAL_7E1 (7bit, even parity, 1 stop bit)
  * Supply RX pin, TX pin, inverted=false. Our device has HIGH == no TX
  * light == idle. */
-CustomSoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
+SoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
 
 State state, nextState;
 unsigned long lastStateChange;
@@ -170,7 +192,7 @@ void loop()
     Serial.println(F(">> /?!<CR><LF>"));
     /* Communication starts at 300 baud, at 1+7+1+1=10 bits/septet. So, for
      * 30 septets/second, we can wait 33.3ms when there is nothing. */
-    iskra.begin(300, CSERIAL_7E1);
+    iskra.begin(300, SWSERIAL_7E1);
     iskra.print(F("/?!\r\n"));
     recvBufPos = 0;
     nextState = (state == STATE_START
@@ -224,7 +246,7 @@ void loop()
     }
     /* Assuming that the begin(NEW_SPEED) does not affect the
      * previous print() jobs: we can read/write immediately. */
-    iskra.begin(9600, CSERIAL_7E1);
+    iskra.begin(9600, SWSERIAL_7E1);
     recvBufPos = 0;
     nextState = (state == STATE_ENTER_DATA_MODE
       ? STATE_EXPECT_DATA_READOUT : STATE_EXPECT_PROGRAMMING_MODE);
@@ -258,7 +280,7 @@ void loop()
           } else {
             iskra.print(F(S_ACK));
             recvBuf[recvBufPos - 2] = '\0'; /* drop ETX */
-            
+
             switch (state) {
             case STATE_EXPECT_DATA_READOUT:
               on_data_readout(recvBuf + 1, recvBufPos - 3);
