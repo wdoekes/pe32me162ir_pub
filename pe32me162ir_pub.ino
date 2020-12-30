@@ -20,23 +20,33 @@
  * TODO:
  * - Fix RX/TX ports;
  * - make it work with ESP;
- * - actually PUSH something instead of saying yea yea yea;
  * - clean up duplicate code/states with 1.8.0/2.8.0;
  * - can we get the device to poke us? / more granular Watts
  * - fix another low mem warning (probably goes when we remove lastState debug)
  */
 
-/* Serial connection for debugging. Don't increase this, it seems to
- * interfere with the CustomSoftwareSerial. Haven't looked at why, but
- * the software serial starts communicating crap. */
+/* Select speed for HardwareSerial connection for debugging.
+ * - On the ESP8266, it needs to be sufficiently high. When set to 9600,
+ *   the SoftwareSerial (also running in 9600) created duplicate data in
+ *   the input.
+ * - On the Arduino Uno, it needs to be exactly 9600. If we increase it,
+ *   the SoftwareSerial starts communicating crap. */
+#if defined(ARDUINO_ARCH_ESP8266)
+const int BAUD = 115200;
+#else
 const int BAUD = 9600;
+#endif
 
 /* Pin definitions:
  * - on the ISKRA ME-162, the RX on the LEFT;
  * - so our IR TX must be on the LEFT. */
+#if defined(ARDUINO_ARCH_ESP8266)
+const int PIN_IR_RX = 5;  // D1 / GPIO5
+const int PIN_IR_TX = 4;  // D2 / GPIO4
+#else
 const int PIN_IR_RX = 10; // connect to digital pin 10
 const int PIN_IR_TX = 9;  // connect to digital pin 9
-//const int PIN_LED = 13; // standard Arduino Led
+#endif
 
 #include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
 
@@ -47,6 +57,7 @@ const int PIN_IR_TX = 9;  // connect to digital pin 9
 # include <ArduinoMqttClient.h>
 # include <ESP8266WiFi.h>
 # include <SoftwareSerial.h>
+# define HAVE_MQTT
 #elif defined(ARDUINO_ARCH_AVR)
 # include <CustomSoftwareSerial.h>
 # define SoftwareSerial CustomSoftwareSerial
@@ -55,11 +66,11 @@ const int PIN_IR_TX = 9;  // connect to digital pin 9
   const int SWSERIAL_7E1 = 0;
   class SoftwareSerial {
   public:
-    SoftwareSerial(int, int, bool) {};
+    SoftwareSerial(int, int, bool) {}
     void begin(long, unsigned short) {}
     int available() { return true; }
-    void print(char const *) {}
     int read() { return 0; }
+    void print(char const *) {}
   };
 # undef F
 # define F(x) x
@@ -111,10 +122,6 @@ enum State {
   STATE_SLEEP
 };
 
-/* We use the guid to store something unique to identify the device by.
- * For now, we'll populate it with the ESP8266 Wifi MAC address. */
-static char guid[24]; // "EUI48:11:22:33:44:55:66"
-
 /* Calculate and (optionally) check block check character (BCC) */
 static int din_66219_bcc(const char *s);
 
@@ -123,6 +130,10 @@ static void on_hello(const char *data, size_t end, State st);
 static void on_data_readout(const char *data, size_t end);
 static void on_response(const char *data, size_t end, State st);
 static void on_push();
+#ifdef HAVE_MQTT
+static void ensure_wifi();
+static void ensure_mqtt();
+#endif
 
 /* ASCII control codes */
 const char C_SOH = '\x01';
@@ -135,6 +146,15 @@ const char C_ACK = '\x06';
 #define S_ACK "\x06"
 const char C_NAK = '\x15';
 #define S_NAK "\x15"
+
+#ifdef HAVE_MQTT
+/* We use the guid to store something unique to identify the device by.
+ * For now, we'll populate it with the ESP8266 Wifi MAC address. */
+static char guid[24]; // "EUI48:11:22:33:44:55:66"
+
+WiFiClient wifiClient;
+MqttClient mqttClient(wifiClient);
+#endif
 
 /* We need a (Custom)SoftwareSerial because the Arduino Uno does not do
  * 300 baud. Once we get up to speed, we could use the HardwareSerial
@@ -170,16 +190,28 @@ void setup()
   while (!Serial)
     delay(0);
 
-  //pinMode(PIN_LED, OUTPUT);
+#ifdef HAVE_MQTT
+  strncpy(guid, "EUI48:", 6);
+  strncpy(guid + 6, WiFi.macAddress().c_str(), sizeof(guid) - (6 + 1));
+#endif
+
   pinMode(PIN_IR_RX, INPUT);
   pinMode(PIN_IR_TX, OUTPUT);
 
+  // Welcome message
+  Serial.print("Booted pe32me162ir_pub " VERSION " guid ");
+#ifdef HAVE_MQTT
+  Serial.println(guid);
+  // Initial connect
+  ensure_wifi();
+  ensure_mqtt();
+#else
+  Serial.println("!HAVE_MQTT");
+#endif
+
   state = nextState = STATE_START;
   lastStateChange = millis();
-  delay(1000);
-  Serial.println("pe32iskra_pub: ISKRA ME-162 publisher");
 }
-
 
 void loop()
 {
@@ -193,8 +225,12 @@ void loop()
     /* Communication starts at 300 baud, at 1+7+1+1=10 bits/septet. So, for
      * 30 septets/second, we can wait 33.3ms when there is nothing. */
     iskra.begin(300, SWSERIAL_7E1);
+    /* According to spec, the time between the reception of a message
+     * and the transmission of an answer is: between 200ms (or 20ms) and
+     * 1500ms. So adding an appropriate delay(200) before send should be
+     * sufficient. */
+    delay(200);
     iskra.print(F("/?!\r\n"));
-    recvBufPos = 0;
     nextState = (state == STATE_START
       ? STATE_EXPECT_HELLO : STATE_EXPECT_HELLO2);
     break;
@@ -209,7 +245,9 @@ void loop()
         /* We've received (at least three) 0x7f's at the start. Ignore
          * all of them, as we won't expect them in the hello anyway. */
         if (recvBufPos == 0 && c == 0x7f) {
-          //Serial.println(F("<< skipping 0x7f"));
+#if !defined(ARDUINO_ARCH_ESP8266)
+          Serial.println(F("<< skipping 0x7f")); // not seen on ESP8266
+#endif
         } else {
           recvBuf[recvBufPos++] = c;
           recvBuf[recvBufPos] = '\0';
@@ -217,37 +255,45 @@ void loop()
         if (c == '\n' && recvBufPos >= 2 && recvBuf[recvBufPos - 2] == '\r') {
           recvBuf[recvBufPos - 2] = '\0'; /* drop <CR><LF> */
           on_hello(recvBuf + 1, recvBufPos - 3, state);
-          recvBufPos = 0;
           done = true;
           break;
         }
       }
-      if (done)
-        break;
-      if (recvBufPos) {
+#if !defined(ARDUINO_ARCH_ESP8266)
+      /* Especially when the debug Serial is in 9600 baud, writing here
+       * messes up the communication with the IR-port. Additionally, on
+       * the ESP8266, we never return true in the available() above, so
+       * we get a print for every additional character here. */
+      if (!done && recvBufPos) {
         Serial.print(F("<< "));
         Serial.print(recvBuf);
         Serial.println(F(" (cont)"));
       }
+#endif
     }
-    /* When there is no data, wait 30ms for another 10 bits. */
-    delay(30);
+    /* When there is no data, we could wait 30ms for another 10 bits.
+     * But we've seen odd thing happen. Busy-loop instead. */
     break;
 
   /* #3: We send an ACK with "speed 5" to switch to 9600 baud */
   case STATE_ENTER_DATA_MODE:
   case STATE_ENTER_PROGRAMMING_MODE:
+    // ACK V Z Y:
+    //   V = protocol control (0=normal, 1=2ndary, ...)
+    //   Z = 0=NAK or char[3] in HELLO for ACK speed change (9600 for ME162)
+    //   Y = mode control (0=readout, 1=programming, 2=binary)
     if (state == STATE_ENTER_DATA_MODE) {
       Serial.println(F(">> <ACK>050<CR><LF>"));
+      delay(200);
       iskra.print(F(S_ACK "050\r\n"));
     } else {
       Serial.println(F(">> <ACK>051<CR><LF>"));
-      iskra.print(F(S_ACK "051\r\n"));
+      delay(200);
+      iskra.print(F(S_ACK "051\r\n")); // 051=9600baud, 001=300baud (NAK speed)
     }
     /* Assuming that the begin(NEW_SPEED) does not affect the
      * previous print() jobs: we can read/write immediately. */
     iskra.begin(9600, SWSERIAL_7E1);
-    recvBufPos = 0;
     nextState = (state == STATE_ENTER_DATA_MODE
       ? STATE_EXPECT_DATA_READOUT : STATE_EXPECT_PROGRAMMING_MODE);
     break;
@@ -263,10 +309,25 @@ void loop()
         char c = iskra.read();
         /* We'll received some 0x7f's at the start. Ignore them. */
         if (recvBufPos == 0 && c == 0x7f) {
-          //Serial.println(F("<< skipping 0x7f"));
+#if !defined(ARDUINO_ARCH_ESP8266)
+          Serial.println(F("<< skipping 0x7f"));
+#endif
         } else {
           recvBuf[recvBufPos++] = c;
           recvBuf[recvBufPos] = '\0';
+        }
+        if (c == C_NAK) {
+          switch (state) {
+          case STATE_EXPECT_DATA_READOUT:
+            nextState = STATE_ENTER_DATA_MODE; break;
+          case STATE_EXPECT_PROGRAMMING_MODE:
+            nextState = STATE_ENTER_PROGRAMMING_MODE; break;
+          case STATE_EXPECT_1_8_0:
+            nextState = STATE_REQUEST_1_8_0; break;
+          case STATE_EXPECT_2_8_0:
+            nextState = STATE_REQUEST_2_8_0; break;
+          }
+          break;
         }
         if (recvBufPos >= 2 && recvBuf[recvBufPos - 2] == C_ETX) {
           /* We're looking at a BCC now. Validate. */
@@ -274,10 +335,12 @@ void loop()
           Serial.println(recvBuf);
           int res = din_66219_bcc(recvBuf);
           if (res < 0) {
+            delay(200);
             iskra.print(F(S_NAK));
             Serial.print(F("bcc fail: "));
             Serial.println(res, DEC);
           } else {
+            delay(200);
             iskra.print(F(S_ACK));
             recvBuf[recvBufPos - 2] = '\0'; /* drop ETX */
 
@@ -287,7 +350,11 @@ void loop()
               nextState = STATE_UPGRADE;
               break;
             case STATE_EXPECT_PROGRAMMING_MODE:
-              nextState = STATE_REQUEST_1_8_0;
+              if (recvBufPos >= 6 && memcmp(recvBuf, (S_SOH "P0" S_STX "()"), 6) == 0) {
+                nextState = STATE_REQUEST_1_8_0;
+              } else {
+                nextState = STATE_ENTER_PROGRAMMING_MODE;
+              }
               break;
             case STATE_EXPECT_1_8_0:
               on_response(recvBuf + 1, recvBufPos - 3, state);
@@ -299,21 +366,27 @@ void loop()
               break;
             }
           }
-          recvBufPos = 0;
           done = true;
           break;
         }
       }
+#if !defined(ARDUINO_ARCH_ESP8266)
+      /* Especially when the debug Serial is in 9600 baud, writing here
+       * messes up the communication with the IR-port. Additionally, on
+       * the ESP8266, we never return true in the available() above, so
+       * we get a print for every additional character here. */
       if (!done && recvBufPos) {
         Serial.print(F("<< "));
         Serial.print(recvBuf);
         Serial.println(F(" (cont)"));
       }
+#endif
     }
     break;
 
   /* #5: Kill the connection with "<SOH>B0<ETX>" */
   case STATE_UPGRADE:
+    delay(200);
     iskra.print(F(S_SOH "B0" S_ETX "q"));
     nextState = STATE_START2;
     break;
@@ -323,9 +396,15 @@ void loop()
   case STATE_REQUEST_2_8_0:
     Serial.println(F(">> <SOH>R1<STX>[12].8.0()<ETX>"));
     if (state == STATE_REQUEST_1_8_0) {
+      delay(200);
+      // For some reason, the first call to this always fails on the
+      // ESP8266. After a NAK the retry works though.
       iskra.print(F(S_SOH "R1" S_STX "1.8.0()" S_ETX "Z"));
       nextState = STATE_EXPECT_1_8_0;
     } else {
+      delay(200);
+      // For some reason, the first call to this always fails on the
+      // ESP8266. After a NAK the retry works though.
       iskra.print(F(S_SOH "R1" S_STX "2.8.0()" S_ETX "Y"));
       nextState = STATE_EXPECT_2_8_0;
     }
@@ -351,22 +430,28 @@ void loop()
     break;
   }
 
-  if (state != nextState) {
+  if (state != nextState || (
+      state != STATE_SLEEP &&
+      (millis() - lastStateChange) > 15000)) {
+
+    if (state == nextState) {
+      if (recvBufPos) {
+        Serial.print(F("<< "));
+        Serial.print(recvBuf);
+        Serial.print(F(" (stale incoming buffer, size "));
+        Serial.print(recvBufPos);
+        Serial.println(F(")"));
+      }
+      Serial.println(F("state change timeout, resetting..."));
+      nextState = STATE_START;
+    }
     Serial.print(F("state: "));
     Serial.print(state, DEC);
     Serial.print(F(" -> "));
     Serial.println(nextState, DEC);
     state = nextState;
+    recvBufPos = 0;
     lastStateChange = millis();
-  } else if (state != STATE_SLEEP &&
-      (millis() - lastStateChange) > 15000) {
-    Serial.print("millis:");
-    Serial.print(millis(), DEC);
-    Serial.print(", lastStateChange:");
-    Serial.print(lastStateChange, DEC);
-    Serial.print(", diff:");
-    Serial.println((millis() - lastStateChange), DEC);
-    nextState = STATE_START;
   }
 }
 
@@ -416,7 +501,21 @@ void on_data_readout(const char *data, size_t end)
   Serial.print(deviceHello);
   Serial.print(F("]: "));
   Serial.print(data);
-  // FIXME: send to somewhere, including the deviceHello!
+
+#ifdef HAVE_MQTT
+  ensure_wifi();
+  ensure_mqtt();
+  // Use simple application/x-www-form-urlencoded format, except for
+  // the DATA bit (FIXME).
+  mqttClient.beginMessage(mqtt_topic);
+  mqttClient.print("device_id=");
+  mqttClient.print(guid);
+  mqttClient.print("&power_hello=");
+  mqttClient.print(deviceHello);
+  mqttClient.print("&DATA=");
+  mqttClient.print(data); // FIXME: unformatted data..
+  mqttClient.endMessage();
+#endif
 }
 
 static void on_response(const char *data, size_t end, State st)
@@ -455,23 +554,101 @@ static void on_response(const char *data, size_t end, State st)
 
 void on_push()
 {
+#ifdef HAVE_MQTT
+  ensure_wifi();
+  ensure_mqtt();
+
+  // Use simple application/x-www-form-urlencoded format.
+  mqttClient.beginMessage(mqtt_topic);
+  mqttClient.print("device_id=");
+  mqttClient.print(guid);
+#endif
+
   Serial.print("pushing device: ");
   Serial.println(deviceHello);
   for (int idx = 0; idx < 2; ++idx) {
     if (lastValue[idx] >= 0) {
       Serial.print("pushing value: ");
       Serial.println(lastValue[idx]);
+#ifdef HAVE_MQTT
+      // FIXME: we definitely need the "1.8.0" in here too
+      mqttClient.print("&watthour[");
+      mqttClient.print(idx);
+      mqttClient.print("]=");
+      mqttClient.print(lastValue[idx]);
+#endif
     }
     if (deltaTime[idx] > 0) {
       // (Wh * 3600) == Ws; (Tms / 1000) == Ts; W == Ws / T
       float watt = (deltaValue[idx] * 3600.0) / (deltaTime[idx] / 1000.0);
       Serial.print("pushing watt: ");
       Serial.println(watt);
+#ifdef HAVE_MQTT
+      // FIXME: we definitely need the "1.8.0" in here too
+      mqttClient.print("&watt[");
+      mqttClient.print(idx);
+      mqttClient.print("]=");
+      mqttClient.print(watt);
+#endif
     }
   }
+
   Serial.print("pushing uptime: ");
   Serial.println(millis());
+#ifdef HAVE_MQTT
+  mqttClient.print("&uptime=");
+  mqttClient.print(millis());
+  mqttClient.endMessage();
+#endif
 }
+
+#ifdef HAVE_MQTT
+/**
+ * Check that Wifi is up, or connect when not connected.
+ */
+void ensure_wifi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.begin(wifi_ssid, wifi_password);
+    for (int i = 30; i >= 0; --i) {
+      if (WiFi.status() == WL_CONNECTED) {
+        break;
+      }
+      delay(1000);
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("Wifi UP on \"");
+      Serial.print(wifi_ssid);
+      Serial.print("\", Local IP: ");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.print("Wifi NOT UP on \"");
+      Serial.print(wifi_ssid);
+      Serial.println("\".");
+    }
+  }
+}
+#endif // HAVE_MQTT
+
+#ifdef HAVE_MQTT
+/**
+ * Check that the MQTT connection is up or connect if it isn't.
+ */
+void ensure_mqtt()
+{
+  mqttClient.poll();
+  if (!mqttClient.connected()) {
+    if (mqttClient.connect(mqtt_broker, mqtt_port)) {
+      Serial.print("MQTT connected: ");
+      Serial.println(mqtt_broker);
+    } else {
+      Serial.print("MQTT connection to ");
+      Serial.print(mqtt_broker);
+      Serial.print(" failed! Error code = ");
+      Serial.println(mqttClient.connectError());
+    }
+  }
+}
+#endif // HAVE_MQTT
 
 /**
  * Calculate and (optionally) check block check character (BCC)
