@@ -122,6 +122,13 @@ enum State {
 
 /* Calculate and (optionally) check block check character (BCC) */
 static int din_66219_bcc(const char *s);
+/* C-escape values, for readability */
+static const char *cescape(char *buffer, const char *p, size_t maxlen);
+
+/* Helpers */
+static inline void iskra_tx(const char *p);
+static inline void serial_print_cescape(const char *p);
+static inline void trace_rx_buffer();
 
 /* Events */
 static void on_hello(const char *data, size_t end, State st);
@@ -169,34 +176,19 @@ SoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
 State state, nextState;
 unsigned long lastStateChange;
 
-size_t recvBufPos;
-const int recvBufSize = 1023;
-char recvBuf[recvBufSize + 1];
+size_t buffer_pos;
+const int buffer_size = 800;
+char buffer_data[buffer_size + 1];
 
-char deviceHello[16];
+/* IEC 62056-21 6.3.2 + 6.3.14:
+ * 3chars + 1char-baud + (optional) + 16char-ident */
+char identification[32];
 
 long deltaValue[2] = {-1, -1};
 long deltaTime[2] = {-1, -1};
 long lastValue[2] = {-1, -1};
 long lastTime[2] = {-1, -1};
 
-static inline void trace_rx_buffer() {
-#if defined(ARDUINO_ARCH_ESP8266)
-  /* On the ESP8266, the SoftwareSerial.available() never returns true
-   * consecutive times: that means that we'd end up doing the trace()
-   * for _every_ received character.
-   * And when we have (slow) 9600 baud on the debug-Serial, this messes
-   * up communication with the IR-Serial: some echoes appeared in a
-   * longer receive buffer).
-   * Solution: no tracing. */
-#else
-  if (recvBufPos) {
-    Serial.print(F("<< "));
-    Serial.print(recvBuf);
-    Serial.println(F(" (cont)"));
-  }
-#endif
-}
 
 void setup()
 {
@@ -231,16 +223,10 @@ void loop()
   /* #1: At 300 baud, we send "/?!<CR><LF>" or "/?1!<CR><LF>" */
   case STATE_START:
   case STATE_START2:
-    Serial.println(F(">> /?!<CR><LF>"));
     /* Communication starts at 300 baud, at 1+7+1+1=10 bits/septet. So, for
      * 30 septets/second, we could wait 33.3ms when there is nothing. */
     iskra.begin(300, SWSERIAL_7E1);
-    /* According to spec, the time between the reception of a message
-     * and the transmission of an answer is: between 200ms (or 20ms) and
-     * 1500ms. So adding an appropriate delay(200) before send should be
-     * sufficient. */
-    delay(200);
-    iskra.print(F("/?!\r\n"));
+    iskra_tx("/?!\r\n");
     nextState = (state == STATE_START
       ? STATE_EXPECT_HELLO : STATE_EXPECT_HELLO2);
     break;
@@ -250,21 +236,24 @@ void loop()
   case STATE_EXPECT_HELLO2:
     if (iskra.available()) {
       bool done = false;
-      while (iskra.available() && recvBufPos < recvBufSize) {
-        char c = iskra.read();
+      while (iskra.available() && buffer_pos < buffer_size) {
+        char ch = iskra.read();
         /* We've received (at least three) 0x7f's at the start. Ignore
          * all of them, as we won't expect them in the hello anyway. */
-        if (recvBufPos == 0 && c == 0x7f) {
+        if (buffer_pos == 0 && ch == 0x7f) {
 #if defined(ARDUINO_ARCH_AVR)
-          Serial.println(F("<< skipping 0x7f")); // only observed on Arduino
+          Serial.println(F("<< (skipping 0x7f)")); // only observed on Arduino
 #endif
+        } else if (ch == '\0') {
+          Serial.println(F("<< (unexpected NUL, ignoring"));
         } else {
-          recvBuf[recvBufPos++] = c;
-          recvBuf[recvBufPos] = '\0';
+          buffer_data[buffer_pos++] = ch;
+          buffer_data[buffer_pos] = '\0';
         }
-        if (c == '\n' && recvBufPos >= 2 && recvBuf[recvBufPos - 2] == '\r') {
-          recvBuf[recvBufPos - 2] = '\0'; /* drop <CR><LF> */
-          on_hello(recvBuf + 1, recvBufPos - 3, state);
+        if (ch == '\n' && buffer_pos >= 2 &&
+            buffer_data[buffer_pos - 2] == '\r') {
+          buffer_data[buffer_pos - 2] = '\0'; /* drop <CR><LF> */
+          on_hello(buffer_data + 1, buffer_pos - 3, state);
           done = true;
           break;
         }
@@ -279,21 +268,20 @@ void loop()
   /* #3: We send an ACK with "speed 5" to switch to 9600 baud */
   case STATE_ENTER_DATA_MODE:
   case STATE_ENTER_PROGRAMMING_MODE:
-    // ACK V Z Y:
-    //   V = protocol control (0=normal, 1=2ndary, ...)
-    //   Z = 0=NAK or char[3] in HELLO for ACK speed change (9600 for ME162)
-    //   Y = mode control (0=readout, 1=programming, 2=binary)
+    /* ACK V Z Y:
+     *   V = protocol control (0=normal, 1=2ndary, ...)
+     *   Z = 0=NAK or 'ISK5ME162'[3] for ACK speed change (9600 for ME-162)
+     *   Y = mode control (0=readout, 1=programming, 2=binary)
+     * "<ACK>001<CR><LF>" should NAK speed, but go into programming mode,
+     * but that doesn't work. */
     if (state == STATE_ENTER_DATA_MODE) {
-      Serial.println(F(">> <ACK>050<CR><LF>"));
-      delay(200);
-      iskra.print(F(S_ACK "050\r\n"));
+      iskra_tx(S_ACK "050\r\n"); // 050 = 9600baud + data readout mode
     } else {
-      Serial.println(F(">> <ACK>051<CR><LF>"));
-      delay(200);
-      iskra.print(F(S_ACK "051\r\n")); // 051=9600baud, 001=300baud (NAK speed)
+      iskra_tx(S_ACK "051\r\n"); // 051 = 9600baud + programming mode
     }
-    /* Assuming that the begin(NEW_SPEED) does not affect the
-     * previous print() jobs: we can read/write immediately. */
+    /* We're assuming here that the speed change does not affect the
+     * previously written characters. It shouldn't if they're written
+     * synchronously. */
     iskra.begin(9600, SWSERIAL_7E1);
     nextState = (state == STATE_ENTER_DATA_MODE
       ? STATE_EXPECT_DATA_READOUT : STATE_EXPECT_PROGRAMMING_MODE);
@@ -307,18 +295,22 @@ void loop()
   case STATE_EXPECT_2_8_0:            /* <STX>(0000000.001*kWh)<ETX>$BCC */
     if (iskra.available()) {
       bool done = false;
-      while (iskra.available() && recvBufPos < recvBufSize) {
-        char c = iskra.read();
+      while (iskra.available() && buffer_pos < buffer_size) {
+        char ch = iskra.read();
         /* We'll receive some 0x7f's at the start. Ignore them. */
-        if (recvBufPos == 0 && c == 0x7f) {
+        if (buffer_pos == 0 && ch == 0x7f) {
 #if defined(ARDUINO_ARCH_AVR)
-          Serial.println(F("<< skipping 0x7f")); // only observed on Arduino
+          Serial.println(F("<< (skipping 0x7f)")); // only observed on Arduino
 #endif
+        } else if (ch == '\0') {
+          Serial.println(F("<< (unexpected NUL, ignoring"));
         } else {
-          recvBuf[recvBufPos++] = c;
-          recvBuf[recvBufPos] = '\0';
+          buffer_data[buffer_pos++] = ch;
+          buffer_data[buffer_pos] = '\0';
         }
-        if (c == C_NAK) {
+        if (ch == C_NAK) {
+          Serial.print(F("<< "));
+          serial_print_cescape(buffer_data);
           switch (state) {
           case STATE_EXPECT_DATA_READOUT:
             nextState = STATE_ENTER_DATA_MODE; break;
@@ -333,40 +325,39 @@ void loop()
           }
           break;
         }
-        if (recvBufPos >= 2 && recvBuf[recvBufPos - 2] == C_ETX) {
-          /* We're looking at a BCC now. Validate. */
+        if (buffer_pos >= 2 && buffer_data[buffer_pos - 2] == C_ETX) {
           Serial.print(F("<< "));
-          Serial.println(recvBuf);
-          int res = din_66219_bcc(recvBuf);
+          serial_print_cescape(buffer_data);
+
+          /* We're looking at a BCC now. Validate. */
+          int res = din_66219_bcc(buffer_data);
           if (res < 0) {
-            delay(200);
-            iskra.print(F(S_NAK));
+            iskra_tx(S_NAK);
             Serial.print(F("bcc fail: "));
             Serial.println(res);
           } else {
-            delay(200);
-            iskra.print(F(S_ACK));
-            recvBuf[recvBufPos - 2] = '\0'; /* drop ETX */
+            iskra_tx(S_ACK);
+            buffer_data[buffer_pos - 2] = '\0'; /* drop ETX */
 
             switch (state) {
             case STATE_EXPECT_DATA_READOUT:
-              on_data_readout(recvBuf + 1, recvBufPos - 3);
+              on_data_readout(buffer_data + 1, buffer_pos - 3);
               nextState = STATE_UPGRADE;
               break;
             case STATE_EXPECT_PROGRAMMING_MODE:
-              if (recvBufPos >= 6 &&
-                  memcmp(recvBuf, (S_SOH "P0" S_STX "()"), 6) == 0) {
+              if (buffer_pos >= 6 &&
+                  memcmp(buffer_data, (S_SOH "P0" S_STX "()"), 6) == 0) {
                 nextState = STATE_REQUEST_1_8_0;
               } else {
                 nextState = STATE_ENTER_PROGRAMMING_MODE;
               }
               break;
             case STATE_EXPECT_1_8_0:
-              on_response(recvBuf + 1, recvBufPos - 3, state);
+              on_response(buffer_data + 1, buffer_pos - 3, state);
               nextState = STATE_REQUEST_2_8_0;
               break;
             case STATE_EXPECT_2_8_0:
-              on_response(recvBuf + 1, recvBufPos - 3, state);
+              on_response(buffer_data + 1, buffer_pos - 3, state);
               nextState = STATE_PUSH;
               break;
             }
@@ -382,26 +373,22 @@ void loop()
 
   /* #5: Kill the connection with "<SOH>B0<ETX>" */
   case STATE_UPGRADE:
-    delay(200);
-    iskra.print(F(S_SOH "B0" S_ETX "q"));
+    iskra_tx(S_SOH "B0" S_ETX "q");
     nextState = STATE_START2;
     break;
 
   /* Continuous: send "<SOH>R1<STX>1.8.0()<ETX>" for 1.8.0 register */
   case STATE_REQUEST_1_8_0:
   case STATE_REQUEST_2_8_0:
-    Serial.println(F(">> <SOH>R1<STX>[12].8.0()<ETX>"));
     if (state == STATE_REQUEST_1_8_0) {
-      delay(200);
       // For some reason, the first call to this always fails on the
       // ESP8266. After a NAK the retry works though.
-      iskra.print(F(S_SOH "R1" S_STX "1.8.0()" S_ETX "Z"));
+      iskra_tx(S_SOH "R1" S_STX "1.8.0()" S_ETX "Z");
       nextState = STATE_EXPECT_1_8_0;
     } else {
-      delay(200);
       // For some reason, the first call to this always fails on the
       // ESP8266. After a NAK the retry works though.
-      iskra.print(F(S_SOH "R1" S_STX "2.8.0()" S_ETX "Y"));
+      iskra_tx(S_SOH "R1" S_STX "2.8.0()" S_ETX "Y");
       nextState = STATE_EXPECT_2_8_0;
     }
     break;
@@ -432,14 +419,15 @@ void loop()
       (millis() - lastStateChange) > 15000)) {
 
     if (state == nextState) {
-      if (recvBufPos) {
-        Serial.print(F("<< "));
-        Serial.print(recvBuf);
-        Serial.print(F(" (stale incoming buffer, size "));
-        Serial.print(recvBufPos);
-        Serial.println(F(")"));
+      if (buffer_pos) {
+        Serial.print(F("<< (stale buffer sized "));
+        Serial.print(buffer_pos);
+        Serial.print(") ");
+        serial_print_cescape(buffer_data);
       }
-      Serial.println(F("state change timeout, resetting..."));
+      /* After having been connected, it may take up to a minute before
+       * a new connection can be established. */
+      Serial.println(F("timeout: State change took to long, resetting..."));
       nextState = STATE_START;
     }
     Serial.print(F("state: "));
@@ -447,22 +435,22 @@ void loop()
     Serial.print(F(" -> "));
     Serial.println(nextState);
     state = nextState;
-    recvBufPos = 0;
+    buffer_pos = 0;
     lastStateChange = millis();
   }
 }
 
 void on_hello(const char *data, size_t end, State st)
 {
-  /* recvBuf = "ISK5ME162-0033" (ISKRA ME-162)
+  /* buffer_data = "ISK5ME162-0033" (ISKRA ME-162)
    * - uppercase 'K' means slow-ish (200ms (not 20ms) response times)
    * - suggest baud '5' (9600baud) */
   Serial.print(F("on_hello: "));
   Serial.println(data); // "ISK5ME162-0033" (without '/' and <CR><LF>)
 
-  /* Store hello string in deviceHello */
-  deviceHello[sizeof(deviceHello - 1)] = '\0';
-  strncpy(deviceHello, data, sizeof(deviceHello) - 1);
+  /* Store identification string */
+  identification[sizeof(identification - 1)] = '\0';
+  strncpy(identification, data, sizeof(identification) - 1);
 
   /* Check if we can upgrade the speed */
   if (end >= 3 && data[3] == '5') {
@@ -494,7 +482,7 @@ void on_data_readout(const char *data, size_t end)
    * > !                      // end-of-data
    * (With <CR><LF> everywhere.) */
   Serial.print(F("on_data_readout: ["));
-  Serial.print(deviceHello);
+  Serial.print(identification);
   Serial.print(F("]: "));
   Serial.print(data);
 
@@ -507,7 +495,7 @@ void on_data_readout(const char *data, size_t end)
   mqttClient.print("device_id=");
   mqttClient.print(guid);
   mqttClient.print("&power_hello=");
-  mqttClient.print(deviceHello);
+  mqttClient.print(identification);
   mqttClient.print("&DATA=");
   mqttClient.print(data); // FIXME: unformatted data..
   mqttClient.endMessage();
@@ -518,7 +506,7 @@ static void on_response(const char *data, size_t end, State st)
 {
   /* (0032835.698*kWh) */
   Serial.print(F("on_response: ["));
-  Serial.print(deviceHello);
+  Serial.print(identification);
   Serial.print(F(", "));
   Serial.print(st == STATE_EXPECT_1_8_0 ? "1.8.0" : "2.8.0");
   Serial.print(F("]: "));
@@ -561,7 +549,7 @@ void on_push()
 #endif
 
   Serial.print("pushing device: ");
-  Serial.println(deviceHello);
+  Serial.println(identification);
   for (int idx = 0; idx < 2; ++idx) {
     if (lastValue[idx] >= 0) {
       Serial.print("pushing value: ");
@@ -598,11 +586,55 @@ void on_push()
 #endif
 }
 
+static inline void serial_print_cescape(const char *p)
+{
+  char buf[200]; /* watch out, large local variable! */
+  const char *restart = p;
+  do {
+    restart = cescape(buf, restart, 200);
+    Serial.print(buf);
+  } while (restart != NULL);
+  Serial.println();
+}
+
+static inline void iskra_tx(const char *p)
+{
+  Serial.print(F(">> "));
+  serial_print_cescape(p);
+
+  /* According to spec, the time between the reception of a message
+   * and the transmission of an answer is: between 200ms (or 20ms) and
+   * 1500ms. So adding an appropriate delay(200) before send should be
+   * sufficient. */
+  delay(20); /* on my local ME-162, delay(20) is sufficient */
+  iskra.print(p);
+}
+
+static inline void trace_rx_buffer()
+{
+#if defined(ARDUINO_ARCH_ESP8266)
+  /* On the ESP8266, the SoftwareSerial.available() never returns true
+   * consecutive times: that means that we'd end up doing the trace()
+   * for _every_ received character.
+   * And when we have (slow) 9600 baud on the debug-Serial, this messes
+   * up communication with the IR-Serial: some echoes appeared in a
+   * longer receive buffer).
+   * Solution: no tracing. */
+#else
+  if (buffer_pos) {
+    Serial.print(F("<< "));
+    Serial.print(buffer_data); // no cescape here for speed
+    Serial.println(F(" (cont)"));
+  }
+#endif
+}
+
 #ifdef HAVE_MQTT
 /**
  * Check that Wifi is up, or connect when not connected.
  */
-static void ensure_wifi() {
+static void ensure_wifi()
+{
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.begin(wifi_ssid, wifi_password);
     for (int i = 30; i >= 0; --i) {
@@ -647,6 +679,40 @@ static void ensure_mqtt()
 #endif // HAVE_MQTT
 
 /**
+ * C-escape, so we can clean up the rest of the code
+ *
+ * Returns non-NULL to resume if we stopped because of truncation.
+ */
+static const char *cescape(char *buffer, const char *p, size_t maxlen)
+{
+  char ch;
+  char *d = buffer;
+  const char *de = d + maxlen - 4;
+  while (d < de && (ch = *p) != '\0') {
+    if (ch < 0x20 || ch == '\\' || ch == '\x7f') {
+      d[0] = '\\';
+      switch (ch) {
+      case '\n': d[1] = 'n'; d += 1; break;
+      case '\r': d[1] = 'r'; d += 1; break;
+      case '\\': d[1] = '\\'; d += 1; break;
+      default:
+        d[1] = '0' + (ch >> 6);
+        d[2] = '0' + ((ch & 0x3f) >> 3);
+        d[3] = '0' + (ch & 7);
+        d += 3;
+        break;
+      }
+    } else {
+      *d = ch;
+    }
+    ++p;
+    ++d;
+  }
+  *d = '\0';
+  return (*p == '\0') ? NULL : p;
+}
+
+/**
  * Calculate and (optionally) check block check character (BCC)
  *
  * IEC 62056-21 block check character (BCC):
@@ -678,6 +744,25 @@ static int din_66219_bcc(const char *s)
 }
 
 #ifdef TEST_BUILD
+static void test_cescape()
+{
+  char buf[512];
+  const char *pos = buf;
+
+  pos = cescape(buf, "a\x01", 5);
+  printf("cescape %p [a]: %s\n", pos, buf);
+  pos = cescape(buf, pos, 5);
+  printf("cescape %p [\\001]: %s\n", pos, buf);
+
+  pos = cescape(buf, "a\x01", 6);
+  printf("cescape %p [a\\001]: %s\n", pos, buf);
+
+  pos = cescape(buf, "\001X\002ABC\\DEF\r\n", 512);
+  printf("cescape %p [\\001X\\002ABC\\DEF\\r\\n]: %s\n", pos, buf);
+
+  printf("\n");
+}
+
 static void test_din_66219_bcc()
 {
   char test1[] = (
@@ -697,10 +782,12 @@ static void test_din_66219_bcc()
   char test2[] = S_SOH "B0" S_ETX "q";
   printf("[%d] %s\n", din_66219_bcc(test1), test1);
   printf("[%d] %s\n", din_66219_bcc(test2), test2);
+  printf("\n");
 }
 
 int main()
 {
+  test_cescape();
   test_din_66219_bcc();
   on_hello("ISK5ME162-0033", 14, STATE_EXPECT_HELLO);
   on_response("(0032826.545*kWh)", 17, STATE_EXPECT_1_8_0);

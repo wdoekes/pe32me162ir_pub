@@ -20,6 +20,9 @@ public:
     PRINT_FUNCTION(int, "%d");
     PRINT_FUNCTION(long, "%ld");
     PRINT_FUNCTION(unsigned long, "%ld");
+#undef PRINT_FUNCTION
+
+    size_t println() { printf("\n"); return 0; }
 
     bool operator!() { return false; }
 };
