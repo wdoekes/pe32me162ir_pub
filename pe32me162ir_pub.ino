@@ -41,8 +41,7 @@
  *
  * TODO:
  * - clean up duplicate code/states with 1.8.0/2.8.0;
- * - can we get the device to poke us? / more granular Watts
- * - fix another low mem warning (probably goes when we remove lastState debug)
+ * - clean up on_push and on_data_readout debug
  */
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -59,6 +58,13 @@ const int SERMON_BAUD = 9600;   // serial monitor for debugging
 const int PIN_IR_RX = 9;        // digital pin 9
 const int PIN_IR_TX = 10;       // digital pin 10
 #endif
+/* Optionally, you may attach a light sensor diode (or photo transistor
+ * or whatever) to analog pin A0 and have it monitor the red watt hour
+ * pulse LED. This improves the current Watt calculation when the power
+ * consumption is low. A pulse causes the sleep 60s to be cut short,
+ * increasing the possibility that two consecutive readings are "right
+ * after a new watt hour value." */
+const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
 
 /* In config.h, you should have:
 const char wifi_ssid[] = "<ssid>";
@@ -117,7 +123,8 @@ enum State {
   STATE_REQUEST_2_8_0,
   STATE_EXPECT_2_8_0,
   STATE_PUSH,
-  STATE_SLEEP
+  STATE_SLEEP,
+  STATE_WAIT_FOR_PULSE
 };
 
 /* Calculate and (optionally) check block check character (BCC) */
@@ -138,15 +145,15 @@ static void on_push();
 
 /* ASCII control codes */
 const char C_SOH = '\x01';
-#define S_SOH "\x01"
+#define    S_SOH   "\x01"
 const char C_STX = '\x02';
-#define S_STX "\x02"
+#define    S_STX   "\x02"
 const char C_ETX = '\x03';
-#define S_ETX "\x03"
+#define    S_ETX   "\x03"
 const char C_ACK = '\x06';
-#define S_ACK "\x06"
+#define    S_ACK   "\x06"
 const char C_NAK = '\x15';
-#define S_NAK "\x15"
+#define    S_NAK   "\x15"
 
 /* We use the guid to store something unique to identify the device by.
  * For now, we'll populate it with the ESP8266 Wifi MAC address,
@@ -183,6 +190,11 @@ char buffer_data[buffer_size + 1];
 /* IEC 62056-21 6.3.2 + 6.3.14:
  * 3chars + 1char-baud + (optional) + 16char-ident */
 char identification[32];
+
+/* Record low and high pulse values so we can debug/monitor the light
+ * sensor values from the MQTT data. */
+short pulse_low = 1023;
+short pulse_high = 0;
 
 long deltaValue[2] = {-1, -1};
 long deltaTime[2] = {-1, -1};
@@ -399,16 +411,39 @@ void loop()
     nextState = STATE_SLEEP;
     break;
 
-  /* Continuous: sleep a while before data fetch */
+  /* Continuous: sleep 50s before data fetch */
   case STATE_SLEEP:
     /* We need to sleep a lot, or else the Watt guestimate makes no sense
      * for low Wh deltas. For 550W, we'll still only get 9.17 Wh per minute,
-     * so we'd oscillate between 9 (540W) and 10 (600W). */
-    // FIXME: can we get the device to poke us?
-    // FIXME: how about using the Wh-pulse LED as a trigger...?
-    delay(60000);
-    nextState = STATE_REQUEST_1_8_0;
+     * so we'd oscillate between 9 (540W) and 10 (600W).
+     * However: if you monitor the Watt hour pulse LED, we can reduce
+     * the oscillations. */
+    delay(50000);
+    pulse_low = 1023;
+    pulse_high = 0;
+    nextState = STATE_WAIT_FOR_PULSE;
     break;
+
+  /* Continuous: listen for pulse for an additional 10s */
+  case STATE_WAIT_FOR_PULSE: {
+    bool have_waited_10_s = (millis() - lastStateChange) >= 10000;
+    short val = analogRead(A0);
+    if (val < pulse_low) {
+      pulse_low = val;
+    } else if (val > pulse_high) {
+      pulse_high = val;
+    }
+    if (val >= PULSE_THRESHOLD) {
+      /* Sleep cut short, for better average calculations. */
+      Serial.print("pulse: Got value ");
+      Serial.println(val);
+      nextState = STATE_REQUEST_1_8_0;
+    } else if (have_waited_10_s) {
+      /* Timeout waiting for pulse; no problem. */
+      nextState = STATE_REQUEST_1_8_0;
+    }
+    break;
+  }
 
   default:
     break;
@@ -582,6 +617,10 @@ void on_push()
 #ifdef HAVE_MQTT
   mqttClient.print(F("&uptime="));
   mqttClient.print(millis());
+  mqttClient.print(F("&pulse_low="));
+  mqttClient.print(pulse_low);
+  mqttClient.print(F("&pulse_high="));
+  mqttClient.print(pulse_high);
   mqttClient.endMessage();
 #endif
 }
