@@ -425,6 +425,10 @@ void loop()
       /* Sleep cut short, for better average calculations. */
       Serial.print("pulse: Got value ");
       Serial.println(val);
+      /* Add delay, in an attempt to reduce unexplained spikes. If the
+       * spikes are caused by the increment normally not having been
+       * done yet, this might fix it. */
+      delay(500);
       nextState = STATE_WR_REQ_1_8_0;
     } else if (have_waited_max_time) {
       /* Timeout waiting for pulse; no problem. */
