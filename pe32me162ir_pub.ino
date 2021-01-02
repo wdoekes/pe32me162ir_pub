@@ -37,7 +37,7 @@
  *   parity bit and one stop bit;
  * - can be upgraded to higher baud rate (9600) after the handshake;
  * - and allows manufacturer-specific extensions.
- * - see: github.com/lvzon/dsmr-p1-parser/blob/master/doc/IEC-62056-21-notes.md
+ * - See: github.com/lvzon/dsmr-p1-parser/blob/master/doc/IEC-62056-21-notes.md
  *
  * TODO:
  * - clean up duplicate code/states with 1.8.0/2.8.0;
@@ -425,10 +425,8 @@ void loop()
       /* Sleep cut short, for better average calculations. */
       Serial.print("pulse: Got value ");
       Serial.println(val);
-      /* Add delay, in an attempt to reduce unexplained spikes. If the
-       * spikes are caused by the increment normally not having been
-       * done yet, this might fix it. */
-      delay(500);
+      /* Adding delay(50) or even delay(500) here, in an attempt to
+       * reduce unexplained spikes only had adverse effects. */
       nextState = STATE_WR_REQ_1_8_0;
     } else if (have_waited_max_time) {
       /* Timeout waiting for pulse; no problem. */
