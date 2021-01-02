@@ -7,7 +7,7 @@
  *   BEWARE: be sure to check the direction of the two BC547 transistors.
  *   The pictures on the wiki have them backwards. Check the
  *   https://wiki.hal9k.dk/_media/projects/kamstrup-schem-v2.pdf !
- * - ESP8266 (NodeMCU, with Wifi) _or_ an Arduino (Uno?). Wifi/MQTT push
+ * - ESP8266 (NodeMCU, with Wifi) _or_ an Arduino (Uno?). Wifi/MQTT publish
  *   support is only(!) available for the ESP8266 at the moment.
  * - attach PIN_IR_RX<->RX, PIN_IR_TX<->TX, 3VC<->VCC (or 5VC), GND<->GND
  *
@@ -41,7 +41,7 @@
  *
  * TODO:
  * - clean up duplicate code/states with 1.8.0/2.8.0;
- * - clean up on_push and on_data_readout debug
+ * - clean up publish and on_data_readout debug
  */
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -74,9 +74,9 @@ const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
  * we'd (state change) timeout and go back to start.
  * (One advantage of the 30s, is that we get more granular Watt usage
  * during peak times.) */
-const int PUSH_INTERVAL_MIN = 30;     // wait at least 30s before push
-const int PUSH_INTERVAL_MAX = 60;     // wait at most 60s before push
-const int STATE_CHANGE_TIMEOUT = 15;  // reset state after 15s of no change
+const int PUBLISH_INTERVAL_MIN = 30; // wait at least 30s before publish
+const int PUBLISH_INTERVAL_MAX = 60; // wait at most 60s before publish
+const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
 
 /* In config.h, you should have:
 const char wifi_ssid[] = "<ssid>";
@@ -120,21 +120,23 @@ static inline void ensure_mqtt() {} /* noop */
 
 
 enum State {
-  STATE_START = 0,
-  STATE_EXPECT_HELLO,
-  STATE_ENTER_DATA_MODE,
-  STATE_EXPECT_DATA_READOUT,
-  STATE_EXPECT_DATA_READOUT_SLOW,
-  STATE_UPGRADE,
-  STATE_START2,
-  STATE_EXPECT_HELLO2,
-  STATE_ENTER_PROGRAMMING_MODE,
-  STATE_EXPECT_PROGRAMMING_MODE,
-  STATE_REQUEST_1_8_0,
-  STATE_EXPECT_1_8_0,
-  STATE_REQUEST_2_8_0,
-  STATE_EXPECT_2_8_0,
-  STATE_PUSH,
+  STATE_WR_LOGIN = 0,
+  STATE_RD_IDENTIFICATION,
+  STATE_WR_REQ_DATA_MODE, /* data (readout) mode */
+  STATE_RD_DATA_READOUT,
+  STATE_RD_DATA_READOUT_SLOW,
+  STATE_WR_RESTART,
+
+  STATE_WR_LOGIN2,
+  STATE_RD_IDENTIFICATION2,
+  STATE_WR_PROG_MODE, /* programming mode */
+  STATE_RD_PROG_MODE_ACK,
+  STATE_WR_REQ_1_8_0,
+  STATE_RD_VAL_1_8_0,
+  STATE_WR_REQ_2_8_0,
+  STATE_RD_VAL_2_8_0,
+
+  STATE_PUBLISH,
   STATE_SLEEP,
   STATE_WAIT_FOR_PULSE
 };
@@ -150,10 +152,12 @@ static inline void serial_print_cescape(const char *p);
 static inline void trace_rx_buffer();
 
 /* Events */
-static void on_hello(const char *data, size_t end, State st);
+static State on_data_block_or_data_set(char *data, size_t pos, State st);
+static State on_hello(const char *data, size_t end, State st);
 static void on_data_readout(const char *data, size_t end);
 static void on_response(const char *data, size_t end, State st);
-static void on_push();
+
+static void publish();
 
 /* ASCII control codes */
 const char C_SOH = '\x01';
@@ -192,7 +196,7 @@ MqttClient mqttClient(wifiClient);
  * HIGH == no TX light == (serial) idle */
 SoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
 
-State state, nextState;
+State state, nextState, writeState;
 unsigned long lastStateChange;
 
 size_t buffer_pos;
@@ -236,7 +240,7 @@ void setup()
   ensure_wifi();
   ensure_mqtt();
 
-  state = nextState = STATE_START;
+  state = nextState = STATE_WR_LOGIN;
   lastStateChange = millis();
 }
 
@@ -245,21 +249,21 @@ void loop()
   switch (state) {
 
   /* #1: At 300 baud, we send "/?!<CR><LF>" or "/?1!<CR><LF>" */
-  case STATE_START:
-  case STATE_START2:
+  case STATE_WR_LOGIN:
+  case STATE_WR_LOGIN2:
+    writeState = state;
     /* Communication starts at 300 baud, at 1+7+1+1=10 bits/septet. So, for
      * 30 septets/second, we could wait 33.3ms when there is nothing. */
     iskra.begin(300, SWSERIAL_7E1);
     iskra_tx("/?!\r\n");
-    nextState = (state == STATE_START
-      ? STATE_EXPECT_HELLO : STATE_EXPECT_HELLO2);
+    nextState = (state == STATE_WR_LOGIN
+      ? STATE_RD_IDENTIFICATION : STATE_RD_IDENTIFICATION2);
     break;
 
   /* #2: We receive "/ISK5ME162-0033<CR><LF>" */
-  case STATE_EXPECT_HELLO:
-  case STATE_EXPECT_HELLO2:
+  case STATE_RD_IDENTIFICATION:
+  case STATE_RD_IDENTIFICATION2:
     if (iskra.available()) {
-      bool done = false;
       while (iskra.available() && buffer_pos < buffer_size) {
         char ch = iskra.read();
         /* We've received (at least three) 0x7f's at the start. Ignore
@@ -277,28 +281,28 @@ void loop()
         if (ch == '\n' && buffer_pos >= 2 &&
             buffer_data[buffer_pos - 2] == '\r') {
           buffer_data[buffer_pos - 2] = '\0'; /* drop <CR><LF> */
-          on_hello(buffer_data + 1, buffer_pos - 3, state);
-          done = true;
+          nextState = on_hello(buffer_data + 1, buffer_pos - 3, state);
+          buffer_pos = 0;
           break;
         }
       }
-      if (!done)
-        trace_rx_buffer();
+      trace_rx_buffer();
     }
     /* When there is no data, we could wait 30ms for another 10 bits.
      * But we've seen odd thing happen. Busy-loop instead. */
     break;
 
   /* #3: We send an ACK with "speed 5" to switch to 9600 baud */
-  case STATE_ENTER_DATA_MODE:
-  case STATE_ENTER_PROGRAMMING_MODE:
+  case STATE_WR_REQ_DATA_MODE:
+  case STATE_WR_PROG_MODE:
+    writeState = state;
     /* ACK V Z Y:
      *   V = protocol control (0=normal, 1=2ndary, ...)
      *   Z = 0=NAK or 'ISK5ME162'[3] for ACK speed change (9600 for ME-162)
      *   Y = mode control (0=readout, 1=programming, 2=binary)
      * "<ACK>001<CR><LF>" should NAK speed, but go into programming mode,
      * but that doesn't work. */
-    if (state == STATE_ENTER_DATA_MODE) {
+    if (state == STATE_WR_REQ_DATA_MODE) {
       iskra_tx(S_ACK "050\r\n"); // 050 = 9600baud + data readout mode
     } else {
       iskra_tx(S_ACK "051\r\n"); // 051 = 9600baud + programming mode
@@ -307,18 +311,17 @@ void loop()
      * previously written characters. It shouldn't if they're written
      * synchronously. */
     iskra.begin(9600, SWSERIAL_7E1);
-    nextState = (state == STATE_ENTER_DATA_MODE
-      ? STATE_EXPECT_DATA_READOUT : STATE_EXPECT_PROGRAMMING_MODE);
+    nextState = (state == STATE_WR_REQ_DATA_MODE
+      ? STATE_RD_DATA_READOUT : STATE_RD_PROG_MODE_ACK);
     break;
 
   /* #4: We expect "<STX>$EDIS_DATA<ETX>$BCC" with power info. */
-  case STATE_EXPECT_DATA_READOUT:
-  case STATE_EXPECT_DATA_READOUT_SLOW:
-  case STATE_EXPECT_PROGRAMMING_MODE: /* <SOH>P0<STX>()<ETX>$BCC */
-  case STATE_EXPECT_1_8_0:            /* <STX>(0032835.698*kWh)<ETX>$BCC */
-  case STATE_EXPECT_2_8_0:            /* <STX>(0000000.001*kWh)<ETX>$BCC */
+  case STATE_RD_DATA_READOUT:
+  case STATE_RD_DATA_READOUT_SLOW:
+  case STATE_RD_PROG_MODE_ACK:      /* <SOH>P0<STX>()<ETX>$BCC */
+  case STATE_RD_VAL_1_8_0:          /* <STX>(0032835.698*kWh)<ETX>$BCC */
+  case STATE_RD_VAL_2_8_0:          /* <STX>(0000000.001*kWh)<ETX>$BCC */
     if (iskra.available()) {
-      bool done = false;
       while (iskra.available() && buffer_pos < buffer_size) {
         char ch = iskra.read();
         /* We'll receive some 0x7f's at the start. Ignore them. */
@@ -335,18 +338,8 @@ void loop()
         if (ch == C_NAK) {
           Serial.print(F("<< "));
           serial_print_cescape(buffer_data);
-          switch (state) {
-          case STATE_EXPECT_DATA_READOUT:
-            nextState = STATE_ENTER_DATA_MODE; break;
-          case STATE_EXPECT_DATA_READOUT_SLOW:
-            nextState = STATE_SLEEP; break;
-          case STATE_EXPECT_PROGRAMMING_MODE:
-            nextState = STATE_ENTER_PROGRAMMING_MODE; break;
-          case STATE_EXPECT_1_8_0:
-            nextState = STATE_REQUEST_1_8_0; break;
-          case STATE_EXPECT_2_8_0:
-            nextState = STATE_REQUEST_2_8_0; break;
-          }
+          nextState = writeState;
+          buffer_pos = 0;
           break;
         }
         if (buffer_pos >= 2 && buffer_data[buffer_pos - 2] == C_ETX) {
@@ -359,86 +352,68 @@ void loop()
             iskra_tx(S_NAK);
             Serial.print(F("bcc fail: "));
             Serial.println(res);
-          } else {
-            iskra_tx(S_ACK);
-            buffer_data[buffer_pos - 2] = '\0'; /* drop ETX */
-
-            switch (state) {
-            case STATE_EXPECT_DATA_READOUT:
-              on_data_readout(buffer_data + 1, buffer_pos - 3);
-              nextState = STATE_UPGRADE;
-              break;
-            case STATE_EXPECT_PROGRAMMING_MODE:
-              if (buffer_pos >= 6 &&
-                  memcmp(buffer_data, (S_SOH "P0" S_STX "()"), 6) == 0) {
-                nextState = STATE_REQUEST_1_8_0;
-              } else {
-                nextState = STATE_ENTER_PROGRAMMING_MODE;
-              }
-              break;
-            case STATE_EXPECT_1_8_0:
-              on_response(buffer_data + 1, buffer_pos - 3, state);
-              nextState = STATE_REQUEST_2_8_0;
-              break;
-            case STATE_EXPECT_2_8_0:
-              on_response(buffer_data + 1, buffer_pos - 3, state);
-              nextState = STATE_PUSH;
-              break;
-            }
+            /* Hope for a restransmit. Reset buffer. */
+            buffer_pos = 0;
+            break;
           }
-          done = true;
+
+          /* Valid BCC. Call appropriate handlers and switch state. */
+          iskra_tx(S_ACK);
+          nextState = on_data_block_or_data_set(buffer_data, buffer_pos, state);
+          buffer_pos = 0;
           break;
         }
       }
-      if (!done)
-        trace_rx_buffer();
+      trace_rx_buffer();
     }
     break;
 
   /* #5: Kill the connection with "<SOH>B0<ETX>" */
-  case STATE_UPGRADE:
+  case STATE_WR_RESTART:
+    writeState = state;
     iskra_tx(S_SOH "B0" S_ETX "q");
-    nextState = STATE_START2;
+    nextState = STATE_WR_LOGIN2;
     break;
 
   /* Continuous: send "<SOH>R1<STX>1.8.0()<ETX>" for 1.8.0 register */
-  case STATE_REQUEST_1_8_0:
-  case STATE_REQUEST_2_8_0:
-    if (state == STATE_REQUEST_1_8_0) {
-      // For some reason, the first call to this always fails on the
-      // ESP8266. After a NAK the retry works though.
+  case STATE_WR_REQ_1_8_0:
+  case STATE_WR_REQ_2_8_0:
+    writeState = state;
+
+    // FIXME: This is really curious, but on the ESP8266, the first R1
+    // request always gets a NAK as response. The retry works. And then
+    // the request for the 2nd value _also_ fails the first time.
+    if (state == STATE_WR_REQ_1_8_0) {
       iskra_tx(S_SOH "R1" S_STX "1.8.0()" S_ETX "Z");
-      nextState = STATE_EXPECT_1_8_0;
+      nextState = STATE_RD_VAL_1_8_0;
     } else {
-      // For some reason, the first call to this always fails on the
-      // ESP8266. After a NAK the retry works though.
       iskra_tx(S_SOH "R1" S_STX "2.8.0()" S_ETX "Y");
-      nextState = STATE_EXPECT_2_8_0;
+      nextState = STATE_RD_VAL_2_8_0;
     }
     break;
 
-  /* Continuous: push data to remote */
-  case STATE_PUSH:
-    on_push();
+  /* Continuous: publish data to remote */
+  case STATE_PUBLISH:
+    publish();
     nextState = STATE_SLEEP;
     break;
 
-  /* Continuous: sleep PUSH_INTERVAL_MIN before data fetch */
+  /* Continuous: sleep PUBLISH_INTERVAL_MIN before data fetch */
   case STATE_SLEEP:
     /* We need to sleep a lot, or else the Watt guestimate makes no sense
      * for low Wh deltas. For 550W, we'll still only get 9.17 Wh per minute,
      * so we'd oscillate between 9 (540W) and 10 (600W).
      * However: if you monitor the Watt hour pulse LED, we can reduce
      * the oscillations. */
-    delay(PUSH_INTERVAL_MIN * 1000);
+    delay(PUBLISH_INTERVAL_MIN * 1000);
     pulse_low = 1023;
     pulse_high = 0;
     nextState = STATE_WAIT_FOR_PULSE;
     break;
 
-  /* Continuous: listen for pulse up to PUSH_INTERVAL_MAX seconds */
+  /* Continuous: listen for pulse up to PUBLISH_INTERVAL_MAX seconds */
   case STATE_WAIT_FOR_PULSE: {
-    const int max_wait = (PUSH_INTERVAL_MAX - PUSH_INTERVAL_MIN) * 1000;
+    const int max_wait = (PUBLISH_INTERVAL_MAX - PUBLISH_INTERVAL_MIN) * 1000;
     bool have_waited_max_time = (millis() - lastStateChange) >= max_wait;
     short val = analogRead(A0);
     if (val < pulse_low) {
@@ -450,10 +425,10 @@ void loop()
       /* Sleep cut short, for better average calculations. */
       Serial.print("pulse: Got value ");
       Serial.println(val);
-      nextState = STATE_REQUEST_1_8_0;
+      nextState = STATE_WR_REQ_1_8_0;
     } else if (have_waited_max_time) {
       /* Timeout waiting for pulse; no problem. */
-      nextState = STATE_REQUEST_1_8_0;
+      nextState = STATE_WR_REQ_1_8_0;
     }
     break;
   }
@@ -477,7 +452,7 @@ void loop()
      * before a new connection can be established. So we may end up here
      * a few times before reconnecting for real. */
     Serial.println(F("timeout: State change took to long, resetting..."));
-    nextState = STATE_START;
+    nextState = STATE_WR_LOGIN;
   }
 
   /* Handle state change */
@@ -492,11 +467,12 @@ void loop()
   }
 }
 
-void on_hello(const char *data, size_t end, State st)
+State on_hello(const char *data, size_t end, State st)
 {
   /* buffer_data = "ISK5ME162-0033" (ISKRA ME-162)
    * - uppercase 'K' means slow-ish (200ms (not 20ms) response times)
-   * - suggest baud '5' (9600baud) */
+   * - (for protocol mode C) suggest baud '5'
+   *   (0=300, 1=600, 2=1200, 3=2400, 4=4800, 5=9600, 6=19200) */
   Serial.print(F("on_hello: "));
   Serial.println(data); // "ISK5ME162-0033" (without '/' and <CR><LF>)
 
@@ -507,16 +483,46 @@ void on_hello(const char *data, size_t end, State st)
   /* Check if we can upgrade the speed */
   if (end >= 3 && data[3] == '5') {
     // Send ACK, and change speed.
-    if (st == STATE_EXPECT_HELLO) {
-      nextState = STATE_ENTER_DATA_MODE;
-    } else if (st == STATE_EXPECT_HELLO2) {
-      nextState = STATE_ENTER_PROGRAMMING_MODE;
+    if (st == STATE_RD_IDENTIFICATION) {
+      return STATE_WR_REQ_DATA_MODE;
+    } else if (st == STATE_RD_IDENTIFICATION2) {
+      return STATE_WR_PROG_MODE;
     }
-  } else {
-    /* If this is not a '5', we cannot upgrade to 9600 baud, and we cannot
-     * enter programming mode to get values ourselves. */
-    nextState = STATE_EXPECT_DATA_READOUT_SLOW;
   }
+  /* If it was not a '5', we cannot upgrade to 9600 baud, and we cannot
+   * enter programming mode to get values ourselves. */
+  return STATE_RD_DATA_READOUT_SLOW;
+}
+
+State on_data_block_or_data_set(char *data, size_t pos, State st)
+{
+  data[pos - 2] = '\0'; /* drop ETX */
+
+  switch (st) {
+  case STATE_RD_DATA_READOUT:
+    on_data_readout(data + 1, pos - 3);
+    return STATE_WR_RESTART;
+
+  case STATE_RD_PROG_MODE_ACK:
+    if (pos >= 6 && memcmp(data, (S_SOH "P0" S_STX "()"), 6) == 0) {
+      return STATE_WR_REQ_1_8_0;
+    }
+    return STATE_WR_PROG_MODE;
+
+  case STATE_RD_VAL_1_8_0:
+    on_response(data + 1, pos - 3, st);
+    return STATE_WR_REQ_2_8_0;
+
+  case STATE_RD_VAL_2_8_0:
+    on_response(data + 1, pos - 3, st);
+    return STATE_PUBLISH;
+
+  default:
+    /* shouldn't get here.. */
+    break;
+  }
+
+  return st;
 }
 
 void on_data_readout(const char *data, size_t end)
@@ -560,14 +566,14 @@ static void on_response(const char *data, size_t end, State st)
   Serial.print(F("on_response: ["));
   Serial.print(identification);
   Serial.print(F(", "));
-  Serial.print(st == STATE_EXPECT_1_8_0 ? "1.8.0" : "2.8.0");
+  Serial.print(st == STATE_RD_VAL_1_8_0 ? "1.8.0" : "2.8.0");
   Serial.print(F("]: "));
   Serial.println(data);
 
   if (end == 17 && data[0] == '(' && data[8] == '.' &&
       memcmp(data + 12, "*kWh)", 5) == 0) {
     long curValue = atol(data + 1) * 1000 + atol(data + 9);
-    int idx = (st == STATE_EXPECT_1_8_0 ? 0 : 1);
+    int idx = (st == STATE_RD_VAL_1_8_0 ? 0 : 1);
 
     /* > This number will overflow (go back to zero), after approximately
      * > 50 days.
@@ -588,7 +594,7 @@ static void on_response(const char *data, size_t end, State st)
   }
 }
 
-void on_push()
+void publish()
 {
   ensure_wifi();
   ensure_mqtt();
@@ -655,14 +661,16 @@ static inline void serial_print_cescape(const char *p)
 
 static inline void iskra_tx(const char *p)
 {
-  Serial.print(F(">> "));
-  serial_print_cescape(p);
-
   /* According to spec, the time between the reception of a message
    * and the transmission of an answer is: between 200ms (or 20ms) and
    * 1500ms. So adding an appropriate delay(200) before send should be
    * sufficient. */
   delay(20); /* on my local ME-162, delay(20) is sufficient */
+
+  /* Delay before debug print; makes more sense in monitor logs. */
+  Serial.print(F(">> "));
+  serial_print_cescape(p);
+
   iskra.print(p);
 }
 
@@ -861,14 +869,14 @@ int main()
 {
   test_cescape();
   test_din_66219_bcc();
-  on_hello("ISK5ME162-0033", 14, STATE_EXPECT_HELLO);
-  on_response("(0032826.545*kWh)", 17, STATE_EXPECT_1_8_0);
+  on_hello("ISK5ME162-0033", 14, STATE_RD_IDENTIFICATION);
+  on_response("(0032826.545*kWh)", 17, STATE_RD_VAL_1_8_0);
   printf("%ld - %ld - %ld\n",
     lastValue[0], deltaValue[0], deltaTime[0]);
-  on_response("(0032826.554*kWh)", 17, STATE_EXPECT_1_8_0);
+  on_response("(0032826.554*kWh)", 17, STATE_RD_VAL_1_8_0);
   printf("%ld - %ld - %ld\n",
     lastValue[0], deltaValue[0], deltaTime[0]);
-  on_push();
+  publish();
   return 0;
 }
 
