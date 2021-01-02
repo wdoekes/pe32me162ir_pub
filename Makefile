@@ -37,5 +37,8 @@ test: ./pe32me162ir_pub.test
 clean:
 	$(RM) $(OBJECTS) ./pe32me162ir_pub.test
 
+example.log: raw.log
+	./raw2example < raw.log > example.log
+
 pe32me162ir_pub.test: $(OBJECTS)
 	$(LINK.cc) -o $@ $^
