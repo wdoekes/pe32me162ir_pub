@@ -141,7 +141,7 @@ enum State {
 
 /* Calculate and (optionally) check block check character (BCC) */
 static int din_66219_bcc(const char *s);
-/* C-escape values, for readability */
+/* C-escape, for improved serial monitor readability */
 static const char *cescape(char *buffer, const char *p, size_t maxlen);
 
 /* Helpers */
@@ -735,7 +735,7 @@ static void ensure_mqtt()
 #endif // HAVE_MQTT
 
 /**
- * C-escape, so we can clean up the rest of the code
+ * C-escape, for improved serial monitor readability
  *
  * Returns non-NULL to resume if we stopped because of truncation.
  */
@@ -748,9 +748,25 @@ static const char *cescape(char *buffer, const char *p, size_t maxlen)
     if (ch < 0x20 || ch == '\\' || ch == '\x7f') {
       d[0] = '\\';
       switch (ch) {
-      case '\n': d[1] = 'n'; d += 1; break;
-      case '\r': d[1] = 'r'; d += 1; break;
-      case '\\': d[1] = '\\'; d += 1; break;
+#if 1
+      // Extension
+      case C_SOH: d[1] = 'S'; d[2] = 'O'; d[3] = 'H'; d += 3; break;
+      case C_STX: d[1] = 'S'; d[2] = 'T'; d[3] = 'X'; d += 3; break;
+      case C_ETX: d[1] = 'E'; d[2] = 'T'; d[3] = 'X'; d += 3; break;
+      case C_ACK: d[1] = 'A'; d[2] = 'C'; d[3] = 'K'; d += 3; break;
+      case C_NAK: d[1] = 'N'; d[2] = 'A'; d[3] = 'K'; d += 3; break;
+#endif
+      // Regular backslash escapes
+      case '\0': d[1] = '0'; d += 1; break;   // 0x00 (unreachable atm)
+      case '\a': d[1] = 'a'; d += 1; break;   // 0x07
+      case '\b': d[1] = 'b'; d += 1; break;   // 0x08
+      case '\t': d[1] = 't'; d += 1; break;   // 0x09
+      case '\n': d[1] = 'n'; d += 1; break;   // 0x0a
+      case '\v': d[1] = 'v'; d += 1; break;   // 0x0b
+      case '\f': d[1] = 'f'; d += 1; break;   // 0x0c
+      case '\r': d[1] = 'r'; d += 1; break;   // 0x0d
+      case '\\': d[1] = '\\'; d += 1; break;  // 0x5c
+      // The rest in (backslash escaped) octal
       default:
         d[1] = '0' + (ch >> 6);
         d[2] = '0' + ((ch & 0x3f) >> 3);
@@ -808,13 +824,13 @@ static void test_cescape()
   pos = cescape(buf, "a\x01", 5);
   printf("cescape %p [a]: %s\n", pos, buf);
   pos = cescape(buf, pos, 5);
-  printf("cescape %p [\\001]: %s\n", pos, buf);
+  printf("cescape %p [\\SOH]: %s\n", pos, buf);
 
   pos = cescape(buf, "a\x01", 6);
-  printf("cescape %p [a\\001]: %s\n", pos, buf);
+  printf("cescape %p [a\\SOH]: %s\n", pos, buf);
 
-  pos = cescape(buf, "\001X\002ABC\\DEF\r\n", 512);
-  printf("cescape %p [\\001X\\002ABC\\DEF\\r\\n]: %s\n", pos, buf);
+  pos = cescape(buf, "\001X\002ABC\\DEF\r\n\003", 512);
+  printf("cescape %p [\\SOHX\\STXABC\\\\DEF\\r\\n\\ETX]: %s\n", pos, buf);
 
   printf("\n");
 }
