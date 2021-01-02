@@ -37,6 +37,11 @@ test: ./pe32me162ir_pub.test
 clean:
 	$(RM) $(OBJECTS) ./pe32me162ir_pub.test
 
+example.diff:
+	bash -c "diff -u \
+	  <(git show HEAD:example.log | sed -e 's/^[^-]*-> //') \
+	  <(sed -e 's/^[^-]*-> //' example.log)"; true
+
 example.log: raw.log
 	./raw2example < raw.log > example.log
 

@@ -65,6 +65,18 @@ const int PIN_IR_TX = 10;       // digital pin 10
  * increasing the possibility that two consecutive readings are "right
  * after a new watt hour value." */
 const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
+/* By leaving the interval between 30s and 60s, we can have 30s in
+ * which to watch for a pulse LED: 30s/Wh-pulse == 120Wh-pulse/hour == 120Watt
+ * I.e. for usage as low as 120Watt, we'll get a pulse in time.
+ * And, if no pulse LED is connected, you'll simply get values every 60s.
+ * Do note that the ISKRA ME-162 appears to time out slightly after 60s.
+ * After that time it will not respond to our programming mode request, and
+ * we'd (state change) timeout and go back to start.
+ * (One advantage of the 30s, is that we get more granular Watt usage
+ * during peak times.) */
+const int PUSH_INTERVAL_MIN = 30;     // wait at least 30s before push
+const int PUSH_INTERVAL_MAX = 60;     // wait at most 60s before push
+const int STATE_CHANGE_TIMEOUT = 15;  // reset state after 15s of no change
 
 /* In config.h, you should have:
 const char wifi_ssid[] = "<ssid>";
@@ -411,22 +423,23 @@ void loop()
     nextState = STATE_SLEEP;
     break;
 
-  /* Continuous: sleep 50s before data fetch */
+  /* Continuous: sleep PUSH_INTERVAL_MIN before data fetch */
   case STATE_SLEEP:
     /* We need to sleep a lot, or else the Watt guestimate makes no sense
      * for low Wh deltas. For 550W, we'll still only get 9.17 Wh per minute,
      * so we'd oscillate between 9 (540W) and 10 (600W).
      * However: if you monitor the Watt hour pulse LED, we can reduce
      * the oscillations. */
-    delay(50000);
+    delay(PUSH_INTERVAL_MIN * 1000);
     pulse_low = 1023;
     pulse_high = 0;
     nextState = STATE_WAIT_FOR_PULSE;
     break;
 
-  /* Continuous: listen for pulse for an additional 10s */
+  /* Continuous: listen for pulse up to PUSH_INTERVAL_MAX seconds */
   case STATE_WAIT_FOR_PULSE: {
-    bool have_waited_10_s = (millis() - lastStateChange) >= 10000;
+    const int max_wait = (PUSH_INTERVAL_MAX - PUSH_INTERVAL_MIN) * 1000;
+    bool have_waited_max_time = (millis() - lastStateChange) >= max_wait;
     short val = analogRead(A0);
     if (val < pulse_low) {
       pulse_low = val;
@@ -438,7 +451,7 @@ void loop()
       Serial.print("pulse: Got value ");
       Serial.println(val);
       nextState = STATE_REQUEST_1_8_0;
-    } else if (have_waited_10_s) {
+    } else if (have_waited_max_time) {
       /* Timeout waiting for pulse; no problem. */
       nextState = STATE_REQUEST_1_8_0;
     }
@@ -449,22 +462,26 @@ void loop()
     break;
   }
 
-  if (state != nextState || (
+  /* Always check for state change timeout */
+  if (state == nextState &&
       state != STATE_SLEEP &&
-      (millis() - lastStateChange) > 15000)) {
-
-    if (state == nextState) {
-      if (buffer_pos) {
-        Serial.print(F("<< (stale buffer sized "));
-        Serial.print(buffer_pos);
-        Serial.print(") ");
-        serial_print_cescape(buffer_data);
-      }
-      /* After having been connected, it may take up to a minute before
-       * a new connection can be established. */
-      Serial.println(F("timeout: State change took to long, resetting..."));
-      nextState = STATE_START;
+      state != STATE_WAIT_FOR_PULSE &&
+      (millis() - lastStateChange) > (STATE_CHANGE_TIMEOUT * 1000)) {
+    if (buffer_pos) {
+      Serial.print(F("<< (stale buffer sized "));
+      Serial.print(buffer_pos);
+      Serial.print(") ");
+      serial_print_cescape(buffer_data);
     }
+    /* Note that after having been connected, it may take up to a minute
+     * before a new connection can be established. So we may end up here
+     * a few times before reconnecting for real. */
+    Serial.println(F("timeout: State change took to long, resetting..."));
+    nextState = STATE_START;
+  }
+
+  /* Handle state change */
+  if (state != nextState) {
     Serial.print(F("state: "));
     Serial.print(state);
     Serial.print(F(" -> "));
