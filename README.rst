@@ -152,10 +152,10 @@ second publish doesn't have two values to compare yet.)
 standardized. I will change it at some point without prior notice! 😈**
 
 
-Bugs
-----
+Probably fixed bugs
+-------------------
 
-Occasionally, we still see spikes that I haven't been able to explain::
+Occasionally, we would still see odd spikes::
 
     +34.0  16:00:53 {'watthour[0]': 32917428, 'watt[0]': 428.78, 'uptime': 6807478, 'pulse_low': '1', 'pulse_high': '101'}
     +34.0  16:01:27 {'watthour[0]': 32917432, 'watt[0]': 428.79, 'uptime': 6841062, 'pulse_low': '1', 'pulse_high': '133'}
@@ -181,7 +181,9 @@ These always appear to be early counts, not late ones.
 *A possible cause could be that we're always getting a value too early:
 if the pulse is sent before the Wh is counter is incremented, we might
 "normally" get a pulse too little, and only sometimes we'd get the right
-value (i.e. one more). But the following graph does not agree with that
-theory.*
+value (i.e. one more).*
 
 .. image:: ./assets/bugs-delay-500-does-not-fix-spikes.png
+
+The above graph initially seemed to disprove that theory, but after
+increasing the delay to a full second, the spikes disappeared.

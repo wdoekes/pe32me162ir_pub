@@ -58,6 +58,7 @@ const int SERMON_BAUD = 9600;   // serial monitor for debugging
 const int PIN_IR_RX = 9;        // digital pin 9
 const int PIN_IR_TX = 10;       // digital pin 10
 #endif
+
 /* Optionally, you may attach a light sensor diode (or photo transistor
  * or whatever) to analog pin A0 and have it monitor the red watt hour
  * pulse LED. This improves the current Watt calculation when the power
@@ -359,7 +360,8 @@ void loop()
 
           /* Valid BCC. Call appropriate handlers and switch state. */
           iskra_tx(S_ACK);
-          nextState = on_data_block_or_data_set(buffer_data, buffer_pos, state);
+          nextState = on_data_block_or_data_set(
+            buffer_data, buffer_pos, state);
           buffer_pos = 0;
           break;
         }
@@ -412,30 +414,33 @@ void loop()
     break;
 
   /* Continuous: listen for pulse up to PUBLISH_INTERVAL_MAX seconds */
-  case STATE_WAIT_FOR_PULSE: {
-    const int max_wait = (PUBLISH_INTERVAL_MAX - PUBLISH_INTERVAL_MIN) * 1000;
-    bool have_waited_max_time = (millis() - lastStateChange) >= max_wait;
-    short val = analogRead(A0);
-    if (val < pulse_low) {
-      pulse_low = val;
-    } else if (val > pulse_high) {
-      pulse_high = val;
+  case STATE_WAIT_FOR_PULSE:
+    {
+      const int max_wait = (
+        PUBLISH_INTERVAL_MAX - PUBLISH_INTERVAL_MIN) * 1000;
+      bool have_waited_max_time = (millis() - lastStateChange) >= max_wait;
+      short val = analogRead(A0);
+      if (val < pulse_low) {
+        pulse_low = val;
+      } else if (val > pulse_high) {
+        pulse_high = val;
+      }
+      if (val >= PULSE_THRESHOLD) {
+        /* Sleep cut short, for better average calculations. */
+        Serial.print("pulse: Got value ");
+        Serial.println(val);
+        /* Add delay. It appears that after a Wh pulse, the meter takes at
+         * most 1000ms to update the Wh counter. Without this delay, we'd
+         * usually get the Wh count of the previous second, except
+         * sometimes. That effect caused seemingly random high and then
+         * low spikes in the Watt averages. */
+        delay(1000);
+        nextState = STATE_WR_REQ_1_8_0;
+      } else if (have_waited_max_time) {
+        /* Timeout waiting for pulse; no problem. */
+        nextState = STATE_WR_REQ_1_8_0;
+      }
     }
-    if (val >= PULSE_THRESHOLD) {
-      /* Sleep cut short, for better average calculations. */
-      Serial.print("pulse: Got value ");
-      Serial.println(val);
-      /* Adding delay(50) or even delay(500) here, in an attempt to
-       * reduce unexplained spikes only had adverse effects. */
-      nextState = STATE_WR_REQ_1_8_0;
-    } else if (have_waited_max_time) {
-      /* Timeout waiting for pulse; no problem. */
-      nextState = STATE_WR_REQ_1_8_0;
-    }
-    break;
-  }
-
-  default:
     break;
   }
 
