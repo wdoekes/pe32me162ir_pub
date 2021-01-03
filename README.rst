@@ -5,11 +5,11 @@ Project Energy 32: *Talk to ISKRA ME162 through optical port, export to MQTT.*
 
 On the `Hal9k Kamstrup Project page
 <https://wiki.hal9k.dk/projects/kamstrup>`_ (by Aalborg hackers) you can
-find instructions to build an IR-transceiver to communicate with *Kamstrup
-electricity meters* using their optical communications port. Such an
-optical communication port is also used by several other electricity
-meters, like the *ISKRA ME-162* commonly found in the Netherlands.
-That IR-transceiver can also be used on those.
+find instructions to build an *optical probe* (infrared transceiver) to
+communicate with *Kamstrup electricity meters* using the optical
+communications port. Such an optical communication port is available on
+several other electricity meters, like the *ISKRA ME-162* commonly found
+in the Netherlands. This optical probe can also be used on those.
 
 This project contains Arduino/ESP8266 code to read values from the
 *ISKRA ME-162 electricity meter* and push them to an MQTT broker.
@@ -18,7 +18,7 @@ This project contains Arduino/ESP8266 code to read values from the
 HOWTO
 -----
 
-1.  First, you order the kit from the Danes: on their `project page
+1.  First, you order the probe kit from the Danes: on their `project page
     <https://wiki.hal9k.dk/projects/kamstrup>`_ they describe the
     contents and how to order.
 
@@ -152,10 +152,10 @@ second publish doesn't have two values to compare yet.)
 standardized. I will change it at some point without prior notice! 😈**
 
 
-Probably fixed bugs
--------------------
+The issue with the odd spikes
+-----------------------------
 
-Occasionally, we would still see odd spikes::
+Occasionally, we would see these odd spikes::
 
     +34.0  16:00:53 {'watthour[0]': 32917428, 'watt[0]': 428.78, 'uptime': 6807478, 'pulse_low': '1', 'pulse_high': '101'}
     +34.0  16:01:27 {'watthour[0]': 32917432, 'watt[0]': 428.79, 'uptime': 6841062, 'pulse_low': '1', 'pulse_high': '133'}
@@ -179,7 +179,7 @@ Watt, we'd expect 423 and 436 Watt.
 These always appear to be early counts, not late ones.
 
 *A possible cause could be that we're always getting a value too early:
-if the pulse is sent before the Wh is counter is incremented, we might
+if the LED pulse is sent before the Wh is counter is incremented, we might
 "normally" get a pulse too little, and only sometimes we'd get the right
 value (i.e. one more).*
 
@@ -187,3 +187,10 @@ value (i.e. one more).*
 
 The above graph initially seemed to disprove that theory, but after
 increasing the delay to a full second, the spikes disappeared.
+
+.. image:: ./assets/bugs-spikes-fixed.png
+
+Now the new graph is more in line with the "old" counter (which was
+still in use last week) which `read the LED pulses
+<https://github.com/wdoekes/pe32me162led_pub>`_ to indicate power
+consumption.

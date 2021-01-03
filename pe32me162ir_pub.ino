@@ -10,8 +10,9 @@
  * - ESP8266 (NodeMCU, with Wifi) _or_ an Arduino (Uno?). Wifi/MQTT publish
  *   support is only(!) available for the ESP8266 at the moment.
  * - attach PIN_IR_RX<->RX, PIN_IR_TX<->TX, 3VC<->VCC (or 5VC), GND<->GND
+ * - optionally, an analog light sensor to attach to A0<->SIG (and 3VC and GND)
  *
- * Dependencies:
+ * Building/dependencies:
  * - Arduino IDE
  * - (for ESP8266) board: package_esp8266com_index.json
  * - (for ESP8266) library: ArduinoMqttClient
