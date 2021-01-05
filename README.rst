@@ -54,7 +54,6 @@ HOWTO
 
         const int PIN_TX = 10;
         const int PIN_LED = 13;
-        int val;
 
         void setup() {
           pinMode(PIN_TX, OUTPUT);
@@ -62,7 +61,7 @@ HOWTO
         }
 
         void loop() {
-          val = HIGH;
+          int val = HIGH;
           digitalWrite(PIN_TX, val);
           digitalWrite(PIN_LED, val);
           delay(1000);
@@ -81,7 +80,7 @@ HOWTO
     confirm that your camera sees it by looking at a TV remote control
     when it's transmitting.)*
 
-    .. image:: assets/kamstrup-pink-tx-light.jpg
+    .. image:: assets/pe32-ir-test-tx.gif
 
 4.  Fourth, you check that the infrared reception works. Run the following code:
 
@@ -96,20 +95,31 @@ HOWTO
           pinMode(PIN_TX, OUTPUT);
           pinMode(PIN_LED, OUTPUT);
 
-          // TX must be LOW, or RX will always be LOW.
-          digitalWrite(PIN_TX, LOW);
-          digitalWrite(PIN_LED, LOW);
+          // TX must be HIGH (=no transmitted light), or RX will always
+          // be HIGH (=no light reception).
+          digitalWrite(PIN_TX, HIGH);
+          digitalWrite(PIN_LED, HIGH);
         }
 
         void loop() {
           int val = digitalRead(PIN_RX);
-          digitalWrite(PIN_LED, val);
+          // Daylight or a bright lamp makes the Arduino LED go out.
+          // Alternately, reception of a TV remote control infrared light
+          // will cause visible flicker of the Arduino LED.
+          if (val == LOW) {
+            digitalWrite(PIN_LED, LOW);
+            delay(50);
+          } else {
+            digitalWrite(PIN_LED, HIGH);
+          }
         }
 
     When the RX photo transistor receives (infrared, but also other)
     light, the RX PIN will be pulled low. The sketch will pull the LED
-    PIN low: LED off. (And vice versa: no RX light causes the LED to
+    PIN low: LED off. (And vice versa: no IR light causes the LED to
     turn on.)
+
+    .. image:: assets/pe32-ir-test-rx.gif
 
 When you have completed the above steps, you should be able to hook it
 up to your electricity meter. Check the commands in the
