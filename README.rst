@@ -122,8 +122,8 @@ HOWTO
     .. image:: assets/pe32-ir-test-rx.gif
 
 When you have completed the above steps, you should be able to hook it
-up to your electricity meter. Check the commands in the
-`pe32me162ir_pub.ino <pe32me162ir_pub.ino>`_ source code for PIN details
+up to your electricity meter. Check the comments at the top of the
+`pe32me162ir_pub.ino <pe32me162ir_pub.ino>`_ source file for PIN details
 and configuration.
 
 After hooking everything up, your meter cupboard might look like this:
