@@ -65,7 +65,9 @@ const int PIN_IR_TX = 10;       // digital pin 10
  * pulse LED. This improves the current Watt calculation when the power
  * consumption is low. A pulse causes the sleep 60s to be cut short,
  * increasing the possibility that two consecutive readings are "right
- * after a new watt hour value." */
+ * after a new watt hour value."
+ * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
+ * > the pulse's width is 40 ms. */
 const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
 /* By leaving the interval between 30s and 60s, we can have 30s in
  * which to watch for a pulse LED: 30s/Wh-pulse == 120Wh-pulse/hour == 120Watt
@@ -204,6 +206,9 @@ SoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
 State state, nextState, writeState;
 unsigned long lastStateChange;
 
+/* Storage for incoming data. If the data readout is larger than this size
+ * bytes, then the rest of the code won't cope. (The observed data is at most
+ * 200 octets long, so this should be sufficient.) */
 size_t buffer_pos;
 const int buffer_size = 800;
 char buffer_data[buffer_size + 1];
@@ -238,12 +243,18 @@ void setup()
   pinMode(PIN_IR_TX, OUTPUT);
 
   // Welcome message
+  delay(200); /* tiny sleep to avoid dupe log after double restart */
   Serial.print(F("Booted pe32me162ir_pub " VERSION " guid "));
   Serial.println(guid);
 
   // Initial connect (if available)
   ensure_wifi();
   ensure_mqtt();
+
+  // Send termination command, in case we were already connected and
+  // in 9600 baud previously.
+  iskra.begin(9600, SWSERIAL_7E1);
+  iskra_tx(S_SOH "B0" S_ETX "q");
 
   state = nextState = STATE_WR_LOGIN;
   lastStateChange = millis();
@@ -309,15 +320,15 @@ void loop()
      * but that doesn't work on the ISKRA. */
     if (state == STATE_WR_REQ_DATA_MODE) {
       iskra_tx(S_ACK "050\r\n"); // 050 = 9600baud + data readout mode
+      nextState = STATE_RD_DATA_READOUT;
     } else {
       iskra_tx(S_ACK "051\r\n"); // 051 = 9600baud + programming mode
+      nextState = STATE_RD_PROG_MODE_ACK;
     }
     /* We're assuming here that the speed change does not affect the
      * previously written characters. It shouldn't if they're written
      * synchronously. */
     iskra.begin(9600, SWSERIAL_7E1);
-    nextState = (state == STATE_WR_REQ_DATA_MODE
-      ? STATE_RD_DATA_READOUT : STATE_RD_PROG_MODE_ACK);
     break;
 
   /* #4: We expect "\STX $EDIS_DATA\ETX $BCC" with power info. */
@@ -335,7 +346,7 @@ void loop()
           Serial.println(F("<< (skipping 0x7f)")); // only observed on Arduino
 #endif
         } else if (ch == '\0') {
-          Serial.println(F("<< (unexpected NUL, ignoring"));
+          Serial.println(F("<< (unexpected NUL, ignoring)"));
         } else {
           buffer_data[buffer_pos++] = ch;
           buffer_data[buffer_pos] = '\0';

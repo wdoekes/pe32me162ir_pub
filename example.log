@@ -1,12 +1,10 @@
-14:05:39.713 -> Wifi UP on "Abraham Linksys", Local IP: 192.168.1.2
-14:05:39.780 -> MQTT connected: example.com
-14:05:39.780 -> >> /?!\r\n
-14:05:39.947 -> state: 0 -> 1
-14:05:54.960 -> timeout: State change took to long, resetting...
-14:05:54.960 -> state: 1 -> 0
-14:05:54.993 -> >> /?!\r\n
-14:05:55.160 -> state: 0 -> 1
-14:05:55.959 -> on_hello: ISK5ME162-0033
+14:05:55.064 -> Booted pe32me162ir_pub v0 guid EUI48:11:22:33:44:55:66
+14:05:55.093 -> Wifi UP on "Abraham Linksys", Local IP: 192.168.1.2
+14:05:55.097 -> MQTT connected: example.com
+14:05:55.131 -> >> \SOH B0\ETX q
+14:05:55.164 -> >> /?!\r\n
+14:05:55.330 -> state: 0 -> 1
+14:05:55.951 -> on_hello: ISK5ME162-0033
 14:05:55.959 -> state: 1 -> 2
 14:05:55.992 -> >> \ACK 050\r\n
 14:05:56.192 -> state: 2 -> 3
