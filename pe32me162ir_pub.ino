@@ -831,28 +831,56 @@ static int din_66219_bcc(const char *s)
 }
 
 #ifdef TEST_BUILD
+static int STR_EQ(const char *func, const char *got, const char *expected)
+{
+  if (strcmp(expected, got) == 0) {
+    printf("OK (%s): \"\"\"%s\"\"\"\n", func, expected);
+    return 1;
+  } else {
+    printf("FAIL (%s): \"\"\"%s\"\"\" != \"\"\"%s\"\"\"\n",
+        func, expected, got);
+    return 0;
+  }
+}
+
+static int INT_EQ(const char *func, int got, int expected)
+{
+  if (expected == got) {
+    printf("OK (%s): %d\n", func, expected);
+    return 1;
+  } else {
+    printf("FAIL (%s): %d != %d\n", func, expected, got);
+    return 0;
+  }
+}
+
 static void test_cescape()
 {
   char buf[512];
   const char *pos = buf;
 
   pos = cescape(buf, "a\x01", 6);
-  printf("cescape %p [a]: %s\n", pos, buf);
-  pos = cescape(buf, pos, 6);
-  printf("cescape %p [\\SOH ]: %s\n", pos, buf);
+  STR_EQ("cescape", buf, "a");
+  pos = cescape(buf, pos, 6); /* continue */
+  STR_EQ("cescape", buf, "\\SOH ");
 
   pos = cescape(buf, "a\x01", 7);
-  printf("cescape %p [a\\SOH ]: %s\n", pos, buf);
+  STR_EQ("cescape", buf, "a\\SOH ");
 
   pos = cescape(buf, "\001X\002ABC\\DEF\r\n\003", 512);
-  printf("cescape %p [\\SOH X\\STX ABC\\\\DEF\\r\\n\\ETX ]: %s\n", pos, buf);
+  STR_EQ("cescape", buf, "\\SOH X\\STX ABC\\\\DEF\\r\\n\\ETX ");
 
   printf("\n");
 }
 
 static void test_din_66219_bcc()
 {
-  char test1[] = (
+  INT_EQ("din_66219_bcc", din_66219_bcc("void"), -1);
+  INT_EQ("din_66219_bcc", din_66219_bcc(S_STX "no_etx"), -2);
+  INT_EQ("din_66219_bcc", din_66219_bcc(S_STX "!" S_ETX), '"');
+  INT_EQ("din_66219_bcc", din_66219_bcc(S_STX "!" S_ETX "\""), '"');
+  /* This sample data readout is 199 characters, including NUL. */
+  INT_EQ("din_66219_bcc", din_66219_bcc(
     S_STX
     "C.1.0(28342193)\r\n"
     "0.0.0(28342193)\r\n"
@@ -865,10 +893,8 @@ static void test_din_66219_bcc()
     "F.F(0000000)\r\n"
     "!\r\n"
     S_ETX
-    "L");
-  char test2[] = S_SOH "B0" S_ETX "q";
-  printf("[%d] %s\n", din_66219_bcc(test1), test1);
-  printf("[%d] %s\n", din_66219_bcc(test2), test2);
+    "L"), 'L');
+  INT_EQ("din_66219_bcc", din_66219_bcc(S_SOH "B0" S_ETX "q"), 'q');
   printf("\n");
 }
 
