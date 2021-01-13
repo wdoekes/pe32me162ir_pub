@@ -345,13 +345,15 @@ void loop()
           break;
         }
         if (buffer_pos >= 2 && buffer_data[buffer_pos - 2] == C_ETX) {
+          /* If the last non-BCC token is EOT, we should send an ACK
+           * to get the rest. But seeing that message ends with ETX, we
+           * should not ACK. */
           Serial.print(F("<< "));
           serial_print_cescape(buffer_data);
 
           /* We're looking at a BCC now. Validate. */
           int res = din_66219_bcc(buffer_data);
           if (res < 0) {
-            iskra_tx(S_NAK);
             Serial.print(F("bcc fail: "));
             Serial.println(res);
             /* Hope for a restransmit. Reset buffer. */
@@ -360,7 +362,6 @@ void loop()
           }
 
           /* Valid BCC. Call appropriate handlers and switch state. */
-          iskra_tx(S_ACK);
           nextState = on_data_block_or_data_set(
             buffer_data, buffer_pos, state);
           buffer_pos = 0;
@@ -383,9 +384,6 @@ void loop()
   case STATE_WR_REQ_2_8_0:
     writeState = state;
 
-    // FIXME: This is really curious, but on the ESP8266, the first R1
-    // request always gets a NAK as response. The retry works. And then
-    // the request for the 2nd value _also_ fails the first time.
     if (state == STATE_WR_REQ_1_8_0) {
       iskra_tx(S_SOH "R1" S_STX "1.8.0()" S_ETX "Z");
       nextState = STATE_RD_VAL_1_8_0;
