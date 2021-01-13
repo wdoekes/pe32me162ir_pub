@@ -41,8 +41,8 @@
  * - See: github.com/lvzon/dsmr-p1-parser/blob/master/doc/IEC-62056-21-notes.md
  *
  * TODO:
- * - clean up duplicate code/states with 1.8.0/2.8.0;
  * - clean up publish and on_data_readout debug
+ * - add more frequent sampling so we can lose the LED
  */
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -130,20 +130,65 @@ enum State {
   STATE_RD_IDENTIFICATION2,
   STATE_WR_PROG_MODE, /* programming mode */
   STATE_RD_PROG_MODE_ACK,
-  STATE_WR_REQ_1_8_0,
-  STATE_RD_VAL_1_8_0,
-  STATE_WR_REQ_2_8_0,
-  STATE_RD_VAL_2_8_0,
+  STATE_WR_REQ_OBIS,
+  STATE_RD_RESP_OBIS,
 
   STATE_PUBLISH,
   STATE_SLEEP,
   STATE_WAIT_FOR_PULSE
 };
 
-/* Calculate and (optionally) check block check character (BCC) */
-static int din_66219_bcc(const char *s);
+/* Subset of OBIS (or EDIS) codes from IEC 62056 provided by the ISKRA ME-162.
+ * [A-B:]C.D.E[*F] where the ISKRA ME-162 does not do [A-B:] medium addressing.
+ * Note that I removed the T1 and T2 types here, as in the Netherlands,
+ * Ripple Control (TF-signal) will be completely disabled for non-"smart"
+ * meters by July 2021. Switching between T1 and T2 will not be possible on
+ * dumb meters: you'll be stuck using a single tariff anyway. */
+enum Obis {
+  OBIS_C_1_0 = 0, // Meter serial number
+  OBIS_F_F_0,     // Fatal error meter status
+  OBIS_1_8_0,     // Positive active energy (A+) total [Wh]
+  OBIS_2_8_0,     // Negative active energy (A+) total [Wh]
+#if 0
+  OBIS_1_8_1,     // Positive active energy (A+) in tariff T1 [Wh]
+  OBIS_1_8_2,     // Positive active energy (A+) in tariff T2 [Wh]
+  OBIS_1_8_3,     // Positive active energy (A+) in tariff T3 [Wh]
+  OBIS_1_8_4,     // Positive active energy (A+) in tariff T4 [Wh]
+  OBIS_2_8_1,     // Negative active energy (A+) in tariff T1 [Wh]
+  // [...]
+  OBIS_15_8_0,    // Total absolute active energy (= 1_8_0 + 2_8_0)
+  // [...]
+#endif
+  OBIS_0_9_1,     // Time (returns (hh:mm:ss))
+  OBIS_0_9_2,     // Date (returns (YY.MM.DD))
+  // alas: the ME-162 does not do "1.7.0" current Watt usage (returns (ERROR))
+  OBIS_LAST
+};
+
+/* Keep in sync with the Obis enum! */
+const char *const Obis_[] = {
+  "C.1.0", "F.F", "1.8.0", "2.8.0",
+#if 0
+  "1.8.1", "1.8.2", "1.8.3", "1.8.4", "2.8.1", "15.8.0",
+#endif
+  "0.9.1", "0.9.2",
+  "UNDEF"
+};
+
+struct obis_values_t {
+  unsigned long values[OBIS_LAST];
+};
+
 /* C-escape, for improved serial monitor readability */
 static const char *cescape(char *buffer, const char *p, size_t maxlen);
+/* Calculate and (optionally) check block check character (BCC) */
+static int din_66219_bcc(const char *s);
+/* Convert string to Obis number or OBIS_LAST if not found */
+static inline enum Obis str2Obis(const char *key, int keylen);
+/* Convert Obis string to number */
+inline const char *Obis2str(Obis obis) { return Obis_[obis]; }
+/* Parse data readout buffer and populate obis_values_t */
+static void parse_data_readout(struct obis_values_t *dst, const char *src);
 
 #ifdef HAVE_MQTT
 static void ensure_wifi();
@@ -162,7 +207,7 @@ static inline void trace_rx_buffer();
 static State on_data_block_or_data_set(char *data, size_t pos, State st);
 static State on_hello(const char *data, size_t end, State st);
 static void on_data_readout(const char *data, size_t end);
-static void on_response(const char *data, size_t end, State st);
+static void on_response(const char *data, size_t end, Obis obis);
 
 static void publish();
 
@@ -222,10 +267,11 @@ char identification[32];
 short pulse_low = 1023;
 short pulse_high = 0;
 
-long deltaValue[2] = {-1, -1};
-long deltaTime[2] = {-1, -1};
-long lastValue[2] = {-1, -1};
-long lastTime[2] = {-1, -1};
+Obis nextObis;
+long deltaValue[OBIS_LAST];
+long deltaTime[OBIS_LAST];
+long lastValue[OBIS_LAST];
+long lastTime[OBIS_LAST];
 
 
 void setup()
@@ -256,6 +302,10 @@ void setup()
   iskra.begin(9600, SWSERIAL_7E1);
   iskra_tx(S_SOH "B0" S_ETX "q");
 
+  // Initial values
+  for (int i = 0; i < OBIS_LAST; ++i) {
+    deltaValue[i] = deltaTime[i] = lastValue[i] = lastTime[i] = -1;
+  }
   state = nextState = STATE_WR_LOGIN;
   lastStateChange = millis();
 }
@@ -317,7 +367,7 @@ void loop()
      *   Z = 0=NAK or 'ISK5ME162'[3] for ACK speed change (9600 for ME-162)
      *   Y = mode control (0=readout, 1=programming, 2=binary)
      * "\ACK 001\r\n" should NAK speed, but go into programming mode,
-     * but that doesn't work on the ISKRA. */
+     * but that doesn't work on the ME-162. */
     if (state == STATE_WR_REQ_DATA_MODE) {
       iskra_tx(S_ACK "050\r\n"); // 050 = 9600baud + data readout mode
       nextState = STATE_RD_DATA_READOUT;
@@ -335,8 +385,7 @@ void loop()
   case STATE_RD_DATA_READOUT:
   case STATE_RD_DATA_READOUT_SLOW:
   case STATE_RD_PROG_MODE_ACK:      /* \SOH P0\STX ()\ETX $BCC */
-  case STATE_RD_VAL_1_8_0:          /* \STX (0032835.698*kWh)\ETX $BCC */
-  case STATE_RD_VAL_2_8_0:          /* \STX (0000000.001*kWh)\ETX $BCC */
+  case STATE_RD_RESP_OBIS:          /* \STX (0032835.698*kWh)\ETX $BCC */
     if (iskra.available()) {
       while (iskra.available() && buffer_pos < buffer_size) {
         char ch = iskra.read();
@@ -394,16 +443,17 @@ void loop()
     break;
 
   /* Continuous: send "\SOH R1\STX 1.8.0()\ETX " for 1.8.0 register */
-  case STATE_WR_REQ_1_8_0:
-  case STATE_WR_REQ_2_8_0:
+  case STATE_WR_REQ_OBIS:
     writeState = state;
-
-    if (state == STATE_WR_REQ_1_8_0) {
-      iskra_tx(S_SOH "R1" S_STX "1.8.0()" S_ETX "Z");
-      nextState = STATE_RD_VAL_1_8_0;
-    } else {
-      iskra_tx(S_SOH "R1" S_STX "2.8.0()" S_ETX "Y");
-      nextState = STATE_RD_VAL_2_8_0;
+    {
+      char buf[16];
+      snprintf(buf, 15, S_SOH "R1" S_STX "%s()" S_ETX, Obis2str(nextObis));
+      char bcc = din_66219_bcc(buf);
+      int pos = strlen(buf);
+      buf[pos] = bcc;
+      buf[pos + 1] = '\0';
+      iskra_tx(buf);
+      nextState = STATE_RD_RESP_OBIS;
     }
     break;
 
@@ -448,10 +498,13 @@ void loop()
          * sometimes. That effect caused seemingly random high and then
          * low spikes in the Watt averages. */
         delay(1000);
-        nextState = STATE_WR_REQ_1_8_0;
+
+        nextObis = OBIS_1_8_0;
+        nextState = STATE_WR_REQ_OBIS;
       } else if (have_waited_max_time) {
         /* Timeout waiting for pulse; no problem. */
-        nextState = STATE_WR_REQ_1_8_0;
+        nextObis = OBIS_1_8_0;
+        nextState = STATE_WR_REQ_OBIS;
       }
     }
     break;
@@ -525,16 +578,17 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
 
   case STATE_RD_PROG_MODE_ACK:
     if (pos >= 6 && memcmp(data, (S_SOH "P0" S_STX "()"), 6) == 0) {
-      return STATE_WR_REQ_1_8_0;
+      nextObis = OBIS_1_8_0;
+      return STATE_WR_REQ_OBIS;
     }
     return STATE_WR_PROG_MODE;
 
-  case STATE_RD_VAL_1_8_0:
-    on_response(data + 1, pos - 3, st);
-    return STATE_WR_REQ_2_8_0;
-
-  case STATE_RD_VAL_2_8_0:
-    on_response(data + 1, pos - 3, st);
+  case STATE_RD_RESP_OBIS:
+    on_response(data + 1, pos - 3, nextObis);
+    nextObis = (Obis)((int)nextObis + 1);
+    if (nextObis < OBIS_LAST) {
+      return STATE_WR_REQ_OBIS;
+    }
     return STATE_PUBLISH;
 
   default:
@@ -582,37 +636,36 @@ void on_data_readout(const char *data, size_t end)
 #endif
 }
 
-static void on_response(const char *data, size_t end, State st)
+static void on_response(const char *data, size_t end, Obis obis)
 {
   /* (0032835.698*kWh) */
   Serial.print(F("on_response: ["));
   Serial.print(identification);
   Serial.print(F(", "));
-  Serial.print(st == STATE_RD_VAL_1_8_0 ? "1.8.0" : "2.8.0");
+  Serial.print(Obis2str(obis));
   Serial.print(F("]: "));
   Serial.println(data);
 
   if (end == 17 && data[0] == '(' && data[8] == '.' &&
       memcmp(data + 12, "*kWh)", 5) == 0) {
     long curValue = atol(data + 1) * 1000 + atol(data + 9);
-    int idx = (st == STATE_RD_VAL_1_8_0 ? 0 : 1);
 
     /* > This number will overflow (go back to zero), after approximately
      * > 50 days.
      * So, we'll do it sooner, but make sure we know about it. */
     long curTime = (millis() & 0x3fffffffL);
 
-    if (lastValue[idx] >= 0) {
-      deltaValue[idx] = (curValue - lastValue[idx]);
-      deltaTime[idx] = (curTime - lastTime[idx]);
-      if (deltaValue[idx] < 0 || deltaTime[idx] < 0) {
-        deltaValue[idx] = deltaTime[idx] = -1;
+    if (lastValue[obis] >= 0) {
+      deltaValue[obis] = (curValue - lastValue[obis]);
+      deltaTime[obis] = (curTime - lastTime[obis]);
+      if (deltaValue[obis] < 0 || deltaTime[obis] < 0) {
+        deltaValue[obis] = deltaTime[obis] = -1;
       }
     } else {
-      deltaValue[idx] = deltaTime[idx] = -1;
+      deltaValue[obis] = deltaTime[obis] = -1;
     }
-    lastValue[idx] = curValue;
-    lastTime[idx] = curTime;
+    lastValue[obis] = curValue;
+    lastTime[obis] = curTime;
   }
 }
 
@@ -630,14 +683,14 @@ void publish()
 
   Serial.print("pushing device: ");
   Serial.println(identification);
-  for (int idx = 0; idx < 2; ++idx) {
+  for (int idx = OBIS_1_8_0; idx <= OBIS_2_8_0; ++idx) {
     if (lastValue[idx] >= 0) {
       Serial.print("pushing value: ");
       Serial.println(lastValue[idx]);
 #ifdef HAVE_MQTT
       // FIXME: we definitely need the "1.8.0" in here too
       mqttClient.print("&watthour[");
-      mqttClient.print(idx);
+      mqttClient.print(idx - OBIS_1_8_0);
       mqttClient.print("]=");
       mqttClient.print(lastValue[idx]);
 #endif
@@ -650,7 +703,7 @@ void publish()
 #ifdef HAVE_MQTT
       // FIXME: we definitely need the "1.8.0" in here too
       mqttClient.print("&watt[");
-      mqttClient.print(idx);
+      mqttClient.print(idx - OBIS_1_8_0);
       mqttClient.print("]=");
       mqttClient.print(watt);
 #endif
@@ -846,6 +899,59 @@ static int din_66219_bcc(const char *s)
   return bcc;
 }
 
+/**
+ * Convert string to Obis enum or OBIS_LAST if not found
+ *
+ * Example: str2Obis("1.8.0", 5) == OBIS_1_8_0
+ * Example: Obis2str[OBIS_1_8_0] == "1.8.0"
+ */
+static inline Obis str2Obis(const char *key, int keylen)
+{
+  for (int i = 0; i < OBIS_LAST; ++i) {
+    if (memcmp(key, Obis_[i], keylen) == 0)
+      return (Obis)i;
+  }
+  return OBIS_LAST;
+}
+
+/**
+ * Parse data readout buffer and populate obis_values_t
+ */
+static void parse_data_readout(struct obis_values_t *dst, const char *src)
+{
+  memset(dst, 0, sizeof(*dst));
+  while (*src != '\0') {
+    int len = 0;
+    const char *key = src;
+    while (*src != '\0' && *src != '(')
+      ++src;
+    if (*src == '\0')
+      break;
+    len = (src++ - key);
+
+    int i = str2Obis(key, len);
+    if (i < OBIS_LAST) {
+      const char *value = src;
+      while (*src != '\0' && *src != ')')
+        ++src;
+      if (*src == '\0')
+        break;
+      len = (src++ - value);
+
+      long lval = atol(value);
+      /* "0032826.545*kWh" */
+      if (len == 15 && value[7] == '.' && memcmp(value + 11, "*kWh", 4) == 0) {
+        lval = lval * 1000 + atol(value + 8);
+      }
+      dst->values[i] = lval;
+    }
+    while (*src != '\0' && *src++ != '\r')
+      ;
+    if (*src++ != '\n')
+      break;
+  }
+}
+
 #ifdef TEST_BUILD
 static int STR_EQ(const char *func, const char *got, const char *expected)
 {
@@ -914,17 +1020,58 @@ static void test_din_66219_bcc()
   printf("\n");
 }
 
+static void test_obis()
+{
+  STR_EQ("Obis2str", Obis2str(OBIS_C_1_0), "C.1.0");
+  STR_EQ("Obis2str", Obis2str(OBIS_1_8_0), "1.8.0");
+  STR_EQ("Obis2str", Obis2str(OBIS_2_8_0), "2.8.0");
+  INT_EQ("str2Obis", str2Obis("C.1.0", 5), OBIS_C_1_0);
+  INT_EQ("str2Obis", str2Obis("1.8.0", 5), OBIS_1_8_0);
+  INT_EQ("str2Obis", str2Obis("2.8.0", 5), OBIS_2_8_0);
+  printf("\n");
+}
+
+static void test_data_readout_to_obis()
+{
+  struct obis_values_t vals;
+  parse_data_readout(&vals, (
+    "C.1.0(28342193)\r\n"
+    "0.0.0(28342193)\r\n"
+    "1.8.0(0032826.545*kWh)\r\n"
+    "1.8.1(0000000.000*kWh)\r\n"
+    "1.8.2(0032826.545*kWh)\r\n"
+    "3.8.2(bogus_value_xxx)\r\n" /* ignore */
+    "2.8.0(0000000.001*kWh)\r\n"
+    "2.8.1(0000000.000*kWh)\r\n"
+    "2.8.2(0000000.001*kWh)\r\n"
+    "F.F(0000000)\r\n!\r\n")); /* the "!\r\n" is also optional */
+  INT_EQ("parse_data_readout", vals.values[OBIS_C_1_0], 28342193);
+  INT_EQ("parse_data_readout", vals.values[OBIS_F_F_0], 0);
+  INT_EQ("parse_data_readout", vals.values[OBIS_1_8_0], 32826545);
+  INT_EQ("parse_data_readout", vals.values[OBIS_2_8_0], 1);
+#if 0
+  INT_EQ("parse_data_readout", vals.values[OBIS_1_8_1], 0);
+  INT_EQ("parse_data_readout", vals.values[OBIS_1_8_2], 32826545);
+  INT_EQ("parse_data_readout", vals.values[OBIS_2_8_1], 0);
+  INT_EQ("parse_data_readout", vals.values[OBIS_2_8_2], 1);
+#endif
+  printf("\n");
+}
+
 int main()
 {
   test_cescape();
   test_din_66219_bcc();
+  test_obis();
+  test_data_readout_to_obis();
+
   on_hello("ISK5ME162-0033", 14, STATE_RD_IDENTIFICATION);
-  on_response("(0032826.545*kWh)", 17, STATE_RD_VAL_1_8_0);
+  on_response("(0032826.545*kWh)", 17, OBIS_1_8_0);
   printf("%ld - %ld - %ld\n",
-    lastValue[0], deltaValue[0], deltaTime[0]);
-  on_response("(0032826.554*kWh)", 17, STATE_RD_VAL_1_8_0);
+    lastValue[OBIS_1_8_0], deltaValue[OBIS_1_8_0], deltaTime[OBIS_1_8_0]);
+  on_response("(0032826.554*kWh)", 17, OBIS_1_8_0);
   printf("%ld - %ld - %ld\n",
-    lastValue[0], deltaValue[0], deltaTime[0]);
+    lastValue[OBIS_1_8_0], deltaValue[OBIS_1_8_0], deltaTime[OBIS_1_8_0]);
   publish();
   return 0;
 }
