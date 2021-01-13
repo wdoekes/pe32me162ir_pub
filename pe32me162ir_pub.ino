@@ -111,11 +111,6 @@ const char mqtt_topic[] = "some/topic";
 #ifdef HAVE_MQTT
 # include <ArduinoMqttClient.h>
 # include <ESP8266WiFi.h>
-static void ensure_wifi();
-static void ensure_mqtt();
-#else
-static inline void ensure_wifi() {} /* noop */
-static inline void ensure_mqtt() {} /* noop */
 #endif
 
 #define VERSION "v0"
@@ -147,6 +142,14 @@ enum State {
 static int din_66219_bcc(const char *s);
 /* C-escape, for improved serial monitor readability */
 static const char *cescape(char *buffer, const char *p, size_t maxlen);
+
+#ifdef HAVE_MQTT
+static void ensure_wifi();
+static void ensure_mqtt();
+#else
+static inline void ensure_wifi() {} /* noop */
+static inline void ensure_mqtt() {} /* noop */
+#endif
 
 /* Helpers */
 static inline void iskra_tx(const char *p);
