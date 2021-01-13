@@ -250,7 +250,7 @@ void loop()
 {
   switch (state) {
 
-  /* #1: At 300 baud, we send "/?!<CR><LF>" or "/?1!<CR><LF>" */
+  /* #1: At 300 baud, we send "/?!\r\n" or "/?1!\r\n" */
   case STATE_WR_LOGIN:
   case STATE_WR_LOGIN2:
     writeState = state;
@@ -262,7 +262,7 @@ void loop()
       ? STATE_RD_IDENTIFICATION : STATE_RD_IDENTIFICATION2);
     break;
 
-  /* #2: We receive "/ISK5ME162-0033<CR><LF>" */
+  /* #2: We receive "/ISK5ME162-0033\r\n" */
   case STATE_RD_IDENTIFICATION:
   case STATE_RD_IDENTIFICATION2:
     if (iskra.available()) {
@@ -282,7 +282,7 @@ void loop()
         }
         if (ch == '\n' && buffer_pos >= 2 &&
             buffer_data[buffer_pos - 2] == '\r') {
-          buffer_data[buffer_pos - 2] = '\0'; /* drop <CR><LF> */
+          buffer_data[buffer_pos - 2] = '\0'; /* drop "\r\n" */
           nextState = on_hello(buffer_data + 1, buffer_pos - 3, state);
           buffer_pos = 0;
           break;
@@ -302,8 +302,8 @@ void loop()
      *   V = protocol control (0=normal, 1=2ndary, ...)
      *   Z = 0=NAK or 'ISK5ME162'[3] for ACK speed change (9600 for ME-162)
      *   Y = mode control (0=readout, 1=programming, 2=binary)
-     * "<ACK>001<CR><LF>" should NAK speed, but go into programming mode,
-     * but that doesn't work. */
+     * "\ACK 001\r\n" should NAK speed, but go into programming mode,
+     * but that doesn't work on the ISKRA. */
     if (state == STATE_WR_REQ_DATA_MODE) {
       iskra_tx(S_ACK "050\r\n"); // 050 = 9600baud + data readout mode
     } else {
@@ -317,12 +317,12 @@ void loop()
       ? STATE_RD_DATA_READOUT : STATE_RD_PROG_MODE_ACK);
     break;
 
-  /* #4: We expect "<STX>$EDIS_DATA<ETX>$BCC" with power info. */
+  /* #4: We expect "\STX $EDIS_DATA\ETX $BCC" with power info. */
   case STATE_RD_DATA_READOUT:
   case STATE_RD_DATA_READOUT_SLOW:
-  case STATE_RD_PROG_MODE_ACK:      /* <SOH>P0<STX>()<ETX>$BCC */
-  case STATE_RD_VAL_1_8_0:          /* <STX>(0032835.698*kWh)<ETX>$BCC */
-  case STATE_RD_VAL_2_8_0:          /* <STX>(0000000.001*kWh)<ETX>$BCC */
+  case STATE_RD_PROG_MODE_ACK:      /* \SOH P0\STX ()\ETX $BCC */
+  case STATE_RD_VAL_1_8_0:          /* \STX (0032835.698*kWh)\ETX $BCC */
+  case STATE_RD_VAL_2_8_0:          /* \STX (0000000.001*kWh)\ETX $BCC */
     if (iskra.available()) {
       while (iskra.available() && buffer_pos < buffer_size) {
         char ch = iskra.read();
@@ -371,14 +371,14 @@ void loop()
     }
     break;
 
-  /* #5: Kill the connection with "<SOH>B0<ETX>" */
+  /* #5: Terminate the connection with "\SOH B0\ETX " */
   case STATE_WR_RESTART:
     writeState = state;
     iskra_tx(S_SOH "B0" S_ETX "q");
     nextState = STATE_WR_LOGIN2;
     break;
 
-  /* Continuous: send "<SOH>R1<STX>1.8.0()<ETX>" for 1.8.0 register */
+  /* Continuous: send "\SOH R1\STX 1.8.0()\ETX " for 1.8.0 register */
   case STATE_WR_REQ_1_8_0:
   case STATE_WR_REQ_2_8_0:
     writeState = state;
@@ -482,7 +482,7 @@ State on_hello(const char *data, size_t end, State st)
    * - (for protocol mode C) suggest baud '5'
    *   (0=300, 1=600, 2=1200, 3=2400, 4=4800, 5=9600, 6=19200) */
   Serial.print(F("on_hello: "));
-  Serial.println(data); // "ISK5ME162-0033" (without '/' and <CR><LF>)
+  Serial.println(data); // "ISK5ME162-0033" (without '/' nor "\r\n")
 
   /* Store identification string */
   identification[sizeof(identification - 1)] = '\0';
@@ -535,7 +535,7 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
 
 void on_data_readout(const char *data, size_t end)
 {
-  /* Data between <STX> and <ETX>. It should look like:
+  /* Data between STX and ETX. It should look like:
    * > C.1.0(28342193)        // Meter serial number
    * > 0.0.0(28342193)        // Device address
    * > 1.8.0(0032826.545*kWh) // Total positive active energy (A+)
@@ -546,7 +546,7 @@ void on_data_readout(const char *data, size_t end)
    * > 2.8.2(0000000.001*kWh) // Negative active energy in second tariff (T2)
    * > F.F(0000000)           // Meter fatal error
    * > !                      // end-of-data
-   * (With <CR><LF> everywhere.) */
+   * (With "\r\n" everywhere.) */
   Serial.print(F("on_data_readout: ["));
   Serial.print(identification);
   Serial.print(F("]: "));
@@ -759,18 +759,19 @@ static const char *cescape(char *buffer, const char *p, size_t maxlen)
 {
   char ch;
   char *d = buffer;
-  const char *de = d + maxlen - 4;
+  const char *de = d + maxlen - 5;
   while (d < de && (ch = *p) != '\0') {
     if (ch < 0x20 || ch == '\\' || ch == '\x7f') {
       d[0] = '\\';
+      d[4] = ' ';
       switch (ch) {
 #if 1
       // Extension
-      case C_SOH: d[1] = 'S'; d[2] = 'O'; d[3] = 'H'; d += 3; break;
-      case C_STX: d[1] = 'S'; d[2] = 'T'; d[3] = 'X'; d += 3; break;
-      case C_ETX: d[1] = 'E'; d[2] = 'T'; d[3] = 'X'; d += 3; break;
-      case C_ACK: d[1] = 'A'; d[2] = 'C'; d[3] = 'K'; d += 3; break;
-      case C_NAK: d[1] = 'N'; d[2] = 'A'; d[3] = 'K'; d += 3; break;
+      case C_SOH: d[1] = 'S'; d[2] = 'O'; d[3] = 'H'; d += 4; break; // SOH
+      case C_STX: d[1] = 'S'; d[2] = 'T'; d[3] = 'X'; d += 4; break; // STX
+      case C_ETX: d[1] = 'E'; d[2] = 'T'; d[3] = 'X'; d += 4; break; // ETX
+      case C_ACK: d[1] = 'A'; d[2] = 'C'; d[3] = 'K'; d += 4; break; // ACK
+      case C_NAK: d[1] = 'N'; d[2] = 'A'; d[3] = 'K'; d += 4; break; // NAK
 #endif
       // Regular backslash escapes
       case '\0': d[1] = '0'; d += 1; break;   // 0x00 (unreachable atm)
@@ -837,16 +838,16 @@ static void test_cescape()
   char buf[512];
   const char *pos = buf;
 
-  pos = cescape(buf, "a\x01", 5);
-  printf("cescape %p [a]: %s\n", pos, buf);
-  pos = cescape(buf, pos, 5);
-  printf("cescape %p [\\SOH]: %s\n", pos, buf);
-
   pos = cescape(buf, "a\x01", 6);
-  printf("cescape %p [a\\SOH]: %s\n", pos, buf);
+  printf("cescape %p [a]: %s\n", pos, buf);
+  pos = cescape(buf, pos, 6);
+  printf("cescape %p [\\SOH ]: %s\n", pos, buf);
+
+  pos = cescape(buf, "a\x01", 7);
+  printf("cescape %p [a\\SOH ]: %s\n", pos, buf);
 
   pos = cescape(buf, "\001X\002ABC\\DEF\r\n\003", 512);
-  printf("cescape %p [\\SOHX\\STXABC\\\\DEF\\r\\n\\ETX]: %s\n", pos, buf);
+  printf("cescape %p [\\SOH X\\STX ABC\\\\DEF\\r\\n\\ETX ]: %s\n", pos, buf);
 
   printf("\n");
 }
