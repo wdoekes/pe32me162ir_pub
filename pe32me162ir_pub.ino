@@ -79,7 +79,7 @@ const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
  * (One advantage of the 30s, is that we get more granular Watt usage
  * during peak times.) */
 const int PUBLISH_INTERVAL_MIN = 30; // wait at least 30s before publish
-const int PUBLISH_INTERVAL_MAX = 60; // wait at most 60s before publish
+const int PUBLISH_INTERVAL_MAX = 58; // wait at most 58s before publish
 const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
 
 /* In config.h, you should have:
