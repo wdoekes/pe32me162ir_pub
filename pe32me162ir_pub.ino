@@ -569,10 +569,12 @@ void on_data_readout(const char *data, size_t end)
 #ifdef HAVE_MQTT
   // Use simple application/x-www-form-urlencoded format, except for
   // the DATA bit (FIXME).
+  // FIXME: NOTE: This is limited to 256 chars in MqttClient.cpp
+  // (TX_PAYLOAD_BUFFER_SIZE).
   mqttClient.beginMessage(mqtt_topic);
   mqttClient.print("device_id=");
   mqttClient.print(guid);
-  mqttClient.print("&power_hello=");
+  mqttClient.print("&id=");
   mqttClient.print(identification);
   mqttClient.print("&DATA=");
   mqttClient.print(data); // FIXME: unformatted data..

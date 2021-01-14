@@ -143,10 +143,10 @@ At the moment, the MQTT messages will look as follows.
 
 Initial publish after device startup::
 
-    device_id=...&power_hello=ISK5ME162-0033&DATA=
+    device_id=...&id=ISK5ME162-0033&DATA=
       C.1.0(28342193)\r\n0.0.0(28342193)\r\n1.8.0(0032916.425*kWh)\r\n
       1.8.1(0000000.000*kWh)\r\n1.8.2(0032916.425*kWh)\r\n2.8.0(0000000.001*kWh)\r\n
-      2.8.1(0000000.000*kWh)\r\n2.8.2(0000000.001*kWh)\r\nF.F(0000000)
+      2.8.1(0000000.000*kWh)\r\n2.8.2(0000000.001*kWh)\r\nF.F(0000000)\r\n!\r\n
 
 Consecutive publishes look like::
 
