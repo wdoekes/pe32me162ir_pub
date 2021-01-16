@@ -91,6 +91,8 @@ const char mqtt_topic[] = "some/topic";
 */
 #include "config.h"
 
+#include "WattGauge.h"
+
 /* Include files specific to the platform (ESP8266, Arduino or TEST) */
 #if defined(ARDUINO_ARCH_ESP8266)
 # include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
@@ -1058,12 +1060,45 @@ static void test_data_readout_to_obis()
   printf("\n");
 }
 
+void test_wattgauge()
+{
+  WattGauge positive;
+  positive.set_watthour(1000, 32826545);
+  positive.set_watthour(2000, 32826545);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 0);
+  positive.set_watthour(3000, 32826546);
+  positive.set_watthour(4000, 32826546);
+  positive.set_watthour(5000, 32826546);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 0);
+  positive.set_watthour(15000, 32826548);
+  positive.set_watthour(25000, 32826550);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 750);
+  positive.reset();
+  positive.set_watthour(30000, 32826552);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 750);
+  positive.set_watthour(35000, 32826554);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 750);
+  positive.set_watthour(40000, 32826556);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
+  positive.set_watthour(45000, 32826558);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
+  positive.reset();
+  positive.set_watthour(60000, 32826558);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
+  positive.set_watthour(90000, 32826559);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
+  positive.set_watthour(120000, 32826560);
+  INT_EQ("WattGauge.get_power", positive.get_power(), 96);
+  printf("\n");
+}
+
 int main()
 {
   test_cescape();
   test_din_66219_bcc();
   test_obis();
   test_data_readout_to_obis();
+  test_wattgauge();
 
   on_hello("ISK5ME162-0033", 14, STATE_RD_IDENTIFICATION);
   on_response("(0032826.545*kWh)", 17, OBIS_1_8_0);
