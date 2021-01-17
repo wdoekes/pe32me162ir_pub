@@ -41,8 +41,11 @@
  * - See: github.com/lvzon/dsmr-p1-parser/blob/master/doc/IEC-62056-21-notes.md
  *
  * TODO:
- * - clean up publish and on_data_readout debug
- * - add more frequent sampling so we can lose the LED
+ * - clean up debug
+ * - add/standardize first MQTT push (with data_readout and date and time)
+ * - test whether losing the LED is now impact-less
+ * - check if we need to split/separate publishing (and resetting of)
+ *   1.8.0 and 2.8.0
  */
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -126,8 +129,7 @@ enum State {
   STATE_RD_RESP_OBIS,
 
   STATE_PUBLISH,
-  STATE_SLEEP,
-  STATE_WAIT_FOR_PULSE
+  STATE_SLEEP
 };
 
 /* Subset of OBIS (or EDIS) codes from IEC 62056 provided by the ISKRA ME-162.
@@ -240,8 +242,9 @@ MqttClient mqttClient(wifiClient);
  * HIGH == no TX light == (serial) idle */
 SoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
 
-State state, nextState, writeState;
-unsigned long lastStateChange;
+/* Current state, scheduled state, current "write" state for retries */
+State state, next_state, write_state;
+long last_statechange;
 
 /* Storage for incoming data. If the data readout is larger than this size
  * bytes, then the rest of the code won't cope. (The observed data is at most
@@ -296,8 +299,8 @@ void setup()
   // Initial values
   pulse_low = 1023;
   pulse_high = 0;
-  state = nextState = STATE_WR_LOGIN;
-  lastStateChange = last_publish = millis();
+  state = next_state = STATE_WR_LOGIN;
+  last_statechange = last_publish = millis();
 }
 
 void loop()
@@ -307,12 +310,12 @@ void loop()
   /* #1: At 300 baud, we send "/?!\r\n" or "/?1!\r\n" */
   case STATE_WR_LOGIN:
   case STATE_WR_LOGIN2:
-    writeState = state;
+    write_state = state;
     /* Communication starts at 300 baud, at 1+7+1+1=10 bits/septet. So, for
      * 30 septets/second, we could wait 33.3ms when there is nothing. */
     iskra.begin(300, SWSERIAL_7E1);
     iskra_tx("/?!\r\n");
-    nextState = (state == STATE_WR_LOGIN
+    next_state = (state == STATE_WR_LOGIN
       ? STATE_RD_IDENTIFICATION : STATE_RD_IDENTIFICATION2);
     break;
 
@@ -337,7 +340,7 @@ void loop()
         if (ch == '\n' && buffer_pos >= 2 &&
             buffer_data[buffer_pos - 2] == '\r') {
           buffer_data[buffer_pos - 2] = '\0'; /* drop "\r\n" */
-          nextState = on_hello(buffer_data + 1, buffer_pos - 3, state);
+          next_state = on_hello(buffer_data + 1, buffer_pos - 3, state);
           buffer_pos = 0;
           break;
         }
@@ -351,7 +354,7 @@ void loop()
   /* #3: We send an ACK with "speed 5" to switch to 9600 baud */
   case STATE_WR_REQ_DATA_MODE:
   case STATE_WR_PROG_MODE:
-    writeState = state;
+    write_state = state;
     /* ACK V Z Y:
      *   V = protocol control (0=normal, 1=2ndary, ...)
      *   Z = 0=NAK or 'ISK5ME162'[3] for ACK speed change (9600 for ME-162)
@@ -360,10 +363,10 @@ void loop()
      * but that doesn't work on the ME-162. */
     if (state == STATE_WR_REQ_DATA_MODE) {
       iskra_tx(S_ACK "050\r\n"); // 050 = 9600baud + data readout mode
-      nextState = STATE_RD_DATA_READOUT;
+      next_state = STATE_RD_DATA_READOUT;
     } else {
       iskra_tx(S_ACK "051\r\n"); // 051 = 9600baud + programming mode
-      nextState = STATE_RD_PROG_MODE_ACK;
+      next_state = STATE_RD_PROG_MODE_ACK;
     }
     /* We're assuming here that the speed change does not affect the
      * previously written characters. It shouldn't if they're written
@@ -393,7 +396,7 @@ void loop()
         if (ch == C_NAK) {
           Serial.print(F("<< "));
           serial_print_cescape(buffer_data);
-          nextState = writeState;
+          next_state = write_state;
           buffer_pos = 0;
           break;
         }
@@ -415,7 +418,7 @@ void loop()
           }
 
           /* Valid BCC. Call appropriate handlers and switch state. */
-          nextState = on_data_block_or_data_set(
+          next_state = on_data_block_or_data_set(
             buffer_data, buffer_pos, state);
           buffer_pos = 0;
           break;
@@ -427,14 +430,14 @@ void loop()
 
   /* #5: Terminate the connection with "\SOH B0\ETX " */
   case STATE_WR_RESTART:
-    writeState = state;
+    write_state = state;
     iskra_tx(S_SOH "B0" S_ETX "q");
-    nextState = STATE_WR_LOGIN2;
+    next_state = STATE_WR_LOGIN2;
     break;
 
   /* Continuous: send "\SOH R1\STX 1.8.0()\ETX " for 1.8.0 register */
   case STATE_WR_REQ_OBIS:
-    writeState = state;
+    write_state = state;
     {
       char buf[16];
       snprintf(buf, 15, S_SOH "R1" S_STX "%s()" S_ETX, Obis2str(nextObis));
@@ -443,30 +446,36 @@ void loop()
       buf[pos] = bcc;
       buf[pos + 1] = '\0';
       iskra_tx(buf);
-      nextState = STATE_RD_RESP_OBIS;
+      next_state = STATE_RD_RESP_OBIS;
     }
     break;
 
   /* Continuous: publish data to remote */
   case STATE_PUBLISH:
+#ifdef HAVE_MQTT
+    /* We don't necessarily publish every 60s, but we _do_ need to keep
+     * the MQTT connection alive. poll() is safe to call often. */
+    mqttClient.poll();
+#endif
     {
       long tdelta_ms = (millis() - last_publish);
-      unsigned power_sum = positive.get_power() + negative.get_power(); /* Watt */
-      unsigned significant_change = (
+      unsigned total_power_watt = (
+        positive.get_power() + negative.get_power());
+      unsigned is_significant_change = (
         positive.get_power_change_factor() <= 0.6 ||
         positive.get_power_change_factor() >= 1.6 ||
         negative.get_power_change_factor() <= 0.6 ||
         negative.get_power_change_factor() >= 1.6);
       /* DEBUG */
       Serial.print("current watt approximation: ");
-      Serial.println(power_sum);
+      Serial.println(total_power_watt);
       /* Only push every 120s or more often when there are significant
        * changes. */
       if (tdelta_ms >= 120000 ||
-            (tdelta_ms >= 60000 && power_sum >= 400) ||
-            (tdelta_ms >= 25000 && significant_change)) {
+            (tdelta_ms >= 60000 && total_power_watt >= 400) ||
+            (tdelta_ms >= 25000 && is_significant_change)) {
         /* DEBUG */
-        if (significant_change) {
+        if (is_significant_change) {
           Serial.print("significant change: ");
           Serial.print(positive.get_power_change_factor());
           Serial.print(" or ");
@@ -480,43 +489,27 @@ void loop()
         last_publish = millis();
       }
     }
-    nextState = STATE_SLEEP;
+    next_state = STATE_SLEEP;
     break;
 
   /* Continuous: just sleep a slight bit */
-  /* FIXME: this is not necessary: the pulse-wait will sleep 1000 or X+1000 */
   case STATE_SLEEP:
-#ifdef HAVE_MQTT
-    /* We don't publish faster than every 60s. So'll we'll need the
-     * mqttClient (and Wifi) to stay up. Calling this continuously
-     * doesn't hurt. */
-    mqttClient.poll();
-#endif
-    delay(200);
-    nextState = STATE_WAIT_FOR_PULSE;
-    break;
-
-  /* Continuous: just sleep a slight bit */
-  case STATE_WAIT_FOR_PULSE:
     /* This is a mashup between simply doing the poll-for-new-totals
      * every second, and only-a-poll-after-pulse:
      * - polling every second or so gives us decent, but not awesome, averages
      * - polling after a pulse gives us great averages
-     * But, the pulse may not work as we want once we have both positive
-     * and negative power counts. Also, it's nice if the device works
-     * without the extra pulse receiver.
-     * But, as long as a pulse receiver is available, it'll increase the
-     * accuracy of the averages. */
+     * But, the pulse may not work properly once we have both positive
+     * and negative power counts. Also, if we can do without the extra
+     * photo transistor, it makes installation simpler.
+     * (But, while it is available, it might increase the accuracy of
+     * the averages. Needs confirmation!) */
     {
       /* Pulse or not, after one second it's time. */
-      bool have_waited_a_second = (millis() - lastStateChange) >= 1000;
+      bool have_waited_a_second = (millis() - last_statechange) >= 1200;
       short val = analogRead(A0);
       /* Debug information, sent over MQTT. */
-      if (val < pulse_low) {
-        pulse_low = val;
-      } else if (val > pulse_high) {
-        pulse_high = val;
-      }
+      pulse_low = min(pulse_low, val);
+      pulse_high = max(pulse_high, val);
       if (val >= PULSE_THRESHOLD || have_waited_a_second) {
         if (!have_waited_a_second) {
           /* Sleep cut short, for better average calculations. */
@@ -530,17 +523,15 @@ void loop()
           delay(1000);
         }
         nextObis = OBIS_1_8_0;
-        nextState = STATE_WR_REQ_OBIS;
+        next_state = STATE_WR_REQ_OBIS;
       }
     }
     break;
   }
 
   /* Always check for state change timeout */
-  if (state == nextState &&
-      state != STATE_SLEEP &&
-      state != STATE_WAIT_FOR_PULSE &&
-      (millis() - lastStateChange) > (STATE_CHANGE_TIMEOUT * 1000)) {
+  if (state == next_state &&
+      (millis() - last_statechange) > (STATE_CHANGE_TIMEOUT * 1000)) {
     if (buffer_pos) {
       Serial.print(F("<< (stale buffer sized "));
       Serial.print(buffer_pos);
@@ -551,18 +542,18 @@ void loop()
      * before a new connection can be established. So we may end up here
      * a few times before reconnecting for real. */
     Serial.println(F("timeout: State change took to long, resetting..."));
-    nextState = STATE_WR_LOGIN;
+    next_state = STATE_WR_LOGIN;
   }
 
   /* Handle state change */
-  if (state != nextState) {
+  if (state != next_state) {
     Serial.print(F("state: "));
     Serial.print(state);
     Serial.print(F(" -> "));
-    Serial.println(nextState);
-    state = nextState;
+    Serial.println(next_state);
+    state = next_state;
     buffer_pos = 0;
-    lastStateChange = millis();
+    last_statechange = millis();
   }
 }
 
@@ -664,9 +655,12 @@ void on_data_readout(const char *data, size_t end)
   mqttClient.beginMessage(mqtt_topic);
   mqttClient.print("device_id=");
   mqttClient.print(guid);
+  // FIXME: move identification to another message; the one where we
+  // also add 0.9.1 and 0.9.2
   mqttClient.print("&id=");
   mqttClient.print(identification);
   mqttClient.print("&DATA=");
+  // FIXME: replace CRLF in data with ", ". replace "&" with ";"
   mqttClient.print(data); // FIXME: unformatted data..
   mqttClient.endMessage();
 #endif

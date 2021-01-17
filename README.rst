@@ -54,6 +54,7 @@ HOWTO
 
         const int PIN_TX = 10;
         const int PIN_LED = 13;
+        int val = LOW;
 
         void setup() {
           pinMode(PIN_TX, OUTPUT);
@@ -61,12 +62,7 @@ HOWTO
         }
 
         void loop() {
-          int val = HIGH;
-          digitalWrite(PIN_TX, val);
-          digitalWrite(PIN_LED, val);
-          delay(1000);
-
-          val = LOW;
+          val = (val == LOW) ? HIGH : LOW;
           digitalWrite(PIN_TX, val);
           digitalWrite(PIN_LED, val);
           delay(1000);
