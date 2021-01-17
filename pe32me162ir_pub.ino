@@ -452,12 +452,26 @@ void loop()
     {
       long tdelta_ms = (millis() - last_publish);
       unsigned power_sum = positive.get_power() + negative.get_power(); /* Watt */
+      unsigned significant_change = (
+        positive.get_power_change_factor() <= 0.6 ||
+        positive.get_power_change_factor() >= 1.6 ||
+        negative.get_power_change_factor() <= 0.6 ||
+        negative.get_power_change_factor() >= 1.6);
       /* DEBUG */
       Serial.print("current watt approximation: ");
       Serial.println(power_sum);
-      /* Only push every 60s or every 30s when consumption is high. */
-      if (tdelta_ms >= 60000 ||
-            (tdelta_ms >= 30000 && power_sum >= 1000)) {
+      /* Only push every 120s or more often when there are significant
+       * changes. */
+      if (tdelta_ms >= 120000 ||
+            (tdelta_ms >= 60000 && power_sum >= 400) ||
+            (tdelta_ms >= 25000 && significant_change)) {
+        /* DEBUG */
+        if (significant_change) {
+          Serial.print("significant change: ");
+          Serial.print(positive.get_power_change_factor());
+          Serial.print(" or ");
+          Serial.println(negative.get_power_change_factor());
+        }
         publish();
         positive.reset();
         negative.reset();

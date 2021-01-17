@@ -47,6 +47,7 @@ private:
     long _p0;       /* first watt hour in a series */
     long _plast;    /* latest watt hour (1 wh = 3600 joule) */
     unsigned _watt; /* average value, but only if it makes some sense */
+    unsigned _wprev; /* previous value, to compare against */
 
     /* _tdelta can be negative when the time wraps! */
     inline long _tdelta() { return _tlast - _t0; }
@@ -85,6 +86,17 @@ public:
         return _watt;
     }
 
+    /* Compare current average with previous */
+    inline float get_power_change_factor() {
+        if (_wprev == 0) {
+            if (_watt < 20)
+                return 1.0; /* no change */
+            return 5.0;
+        }
+        float factor = (float)_watt / (float)_wprev;
+        return factor;
+    }
+
     /* After reading get_power() you'll generally want to reset the
      * state to start a new measurement interval */
     inline void reset() {
@@ -93,6 +105,7 @@ public:
              * the latest time-in-which-there-was-a-change. */
             _t0 = _tlast;
             _p0 = _plast;
+            _wprev = _watt;
         }
     }
 
@@ -378,7 +391,9 @@ static void test_wattgauge()
             atoi(tm + 6) * 1000 +
             atoi(tm + 9));
         positive.set_watthour(ms, data[i].val);
-        //printf("%s: %ld Wh %u Watt\n", tm, data[i].val, positive.get_power());
+        //printf("%s: %ld Wh %u Watt (%fx)\n",
+        //    tm, data[i].val, positive.get_power(),
+        //    positive.get_power_change_factor());
     }
   }
   printf("\n");
