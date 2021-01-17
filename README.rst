@@ -78,7 +78,8 @@ HOWTO
 
     .. image:: assets/pe32-ir-test-tx.gif
 
-4.  Fourth, you check that the infrared reception works. Run the following code:
+4.  Fourth, you check that the infrared reception works. Run the
+    following code:
 
     .. code-block:: c
 
@@ -141,14 +142,23 @@ Initial publish after device startup::
 
     device_id=...&id=ISK5ME162-0033&DATA=
       C.1.0(28342193)\r\n0.0.0(28342193)\r\n1.8.0(0032916.425*kWh)\r\n
-      1.8.1(0000000.000*kWh)\r\n1.8.2(0032916.425*kWh)\r\n2.8.0(0000000.001*kWh)\r\n
-      2.8.1(0000000.000*kWh)\r\n2.8.2(0000000.001*kWh)\r\nF.F(0000000)\r\n!\r\n
+      1.8.1(0000000.000*kWh)\r\n1.8.2(0032916.425*kWh)\r\n
+      2.8.0(0000000.001*kWh)\r\n2.8.1(0000000.000*kWh)\r\n
+      2.8.2(0000000.001*kWh)\r\nF.F(0000000)\r\n!\r\n
 
 Consecutive publishes look like::
 
-    device_id=...&watthour[0]=32916429&watt[0]=364.41&
-      watthour[1]=1&watt[1]=0.00&uptime=54170&
-      pulse_low=8&pulse_high=205
+    device_id=EUI48:11:22:33:44:55:66&
+      e_pos_act_energy_wh=33134208&e_pos_inst_power_w=693&
+      e_neg_act_energy_wh=1&e_neg_inst_power_w=0&
+      dbg_uptime=168355&dbg_pulse=16..148
+
+Where the keys mean:
+
+- e_pos_act_energy_wh (1.8.0) = Positive active energy [Wh]
+- e_neg_act_energy_wh (2.8.0) = Negative active energy [Wh]
+- e_pos_inst_power_w (1.7.0) = Positive active instantaneous power [Watt]
+- e_neg_inst_power_w (2.7.0) = Negative active instantaneous power [Watt]
 
 **BEWARE: The MQTT message format is not well thought out nor
 standardized. I will change it at some point without prior notice! 😈**
@@ -157,19 +167,23 @@ standardized. I will change it at some point without prior notice! 😈**
 The issue with the odd spikes
 -----------------------------
 
+(Note, the following issue was only relevant up until commit d844533.
+After that commit, visible LED pulses are not that important because we
+query the meter for totals every second.)
+
 Occasionally, we would see these odd spikes::
 
-    +34.0  16:00:53 {'watthour[0]': 32917428, 'watt[0]': 428.78, 'uptime': 6807478, 'pulse_low': '1', 'pulse_high': '101'}
-    +34.0  16:01:27 {'watthour[0]': 32917432, 'watt[0]': 428.79, 'uptime': 6841062, 'pulse_low': '1', 'pulse_high': '133'}
-    +33.0  16:02:00 {'watthour[0]': 32917437, 'watt[0]': 535.79, 'uptime': 6874655, 'pulse_low': '1', 'pulse_high': '111'}
-    +34.0  16:02:34 {'watthour[0]': 32917440, 'watt[0]': 321.58, 'uptime': 6908240, 'pulse_low': '1', 'pulse_high': '171'}
-    +33.0  16:03:07 {'watthour[0]': 32917444, 'watt[0]': 427.36, 'uptime': 6941936, 'pulse_low': '1', 'pulse_high': '192'}
-    +34.0  16:03:41 {'watthour[0]': 32917448, 'watt[0]': 427.5,  'uptime': 6975619, 'pulse_low': '1', 'pulse_high': '161'}
-    +34.0  16:04:15 {'watthour[0]': 32917452, 'watt[0]': 429.2,  'uptime': 7009170, 'pulse_low': '1', 'pulse_high': '157'}
-    +33.0  16:04:48 {'watthour[0]': 32917457, 'watt[0]': 536.94, 'uptime': 7042692, 'pulse_low': '1', 'pulse_high': '118'}
-    +34.0  16:05:22 {'watthour[0]': 32917460, 'watt[0]': 321.6,  'uptime': 7076275, 'pulse_low': '1', 'pulse_high': '174'}
-    +34.0  16:05:56 {'watthour[0]': 32917464, 'watt[0]': 424.99, 'uptime': 7110158, 'pulse_low': '1', 'pulse_high': '133'}
-    +36.0  16:06:32 {'watthour[0]': 32917468, 'watt[0]': 395.62, 'uptime': 7146556, 'pulse_low': '1', 'pulse_high': '134'}
+    +34.0  16:00:53 {'e_pos_act_energy_wh': 32917428, 'e_pos_inst_power_w': 428, 'dbg_uptime': 6807478, 'dbg_pulse': '1..101'}
+    +34.0  16:01:27 {'e_pos_act_energy_wh': 32917432, 'e_pos_inst_power_w': 428, 'dbg_uptime': 6841062, 'dbg_pulse': '1..133'}
+    +33.0  16:02:00 {'e_pos_act_energy_wh': 32917437, 'e_pos_inst_power_w': 535, 'dbg_uptime': 6874655, 'dbg_pulse': '1..111'}
+    +34.0  16:02:34 {'e_pos_act_energy_wh': 32917440, 'e_pos_inst_power_w': 321, 'dbg_uptime': 6908240, 'dbg_pulse': '1..171'}
+    +33.0  16:03:07 {'e_pos_act_energy_wh': 32917444, 'e_pos_inst_power_w': 427, 'dbg_uptime': 6941936, 'dbg_pulse': '1..192'}
+    +34.0  16:03:41 {'e_pos_act_energy_wh': 32917448, 'e_pos_inst_power_w': 427, 'dbg_uptime': 6975619, 'dbg_pulse': '1..161'}
+    +34.0  16:04:15 {'e_pos_act_energy_wh': 32917452, 'e_pos_inst_power_w': 429, 'dbg_uptime': 7009170, 'dbg_pulse': '1..157'}
+    +33.0  16:04:48 {'e_pos_act_energy_wh': 32917457, 'e_pos_inst_power_w': 536, 'dbg_uptime': 7042692, 'dbg_pulse': '1..118'}
+    +34.0  16:05:22 {'e_pos_act_energy_wh': 32917460, 'e_pos_inst_power_w': 321, 'dbg_uptime': 7076275, 'dbg_pulse': '1..174'}
+    +34.0  16:05:56 {'e_pos_act_energy_wh': 32917464, 'e_pos_inst_power_w': 424, 'dbg_uptime': 7110158, 'dbg_pulse': '1..133'}
+    +36.0  16:06:32 {'e_pos_act_energy_wh': 32917468, 'e_pos_inst_power_w': 395, 'dbg_uptime': 7146556, 'dbg_pulse': '1..134'}
 
 That is, at ``16:02:00``, there appears to be a Wh value too many (+5
 instead of +4) which is compensated for at ``16:02:34`` (+3 instead of

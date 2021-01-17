@@ -690,49 +690,47 @@ static void on_response(const char *data, size_t end, Obis obis)
   }
 }
 
+/**
+ * Publish the latest data.
+ *
+ * Map:
+ * - 1.8.0 = e_pos_act_energy_wh = Positive active energy [Wh]
+ * - 2.8.0 = e_neg_act_energy_wh = Negative active energy [Wh]
+ * - 1.7.0 = e_pos_inst_power_w = Positive active instantaneous power [Watt]
+ * - 2.7.0 = e_neg_inst_power_w = Negative active instantaneous power [Watt]
+ */
 void publish()
 {
   ensure_wifi();
   ensure_mqtt();
+
+  Serial.print(F("pushing: 1.8.0 (Wh) "));
+  Serial.print(positive.get_energy_total());
+  Serial.print(F(" and 1.7.0 (Watt) "));
+  Serial.println(positive.get_power());
+  Serial.print(F("pushing: 2.8.0 (Wh) "));
+  Serial.print(negative.get_energy_total());
+  Serial.print(F(" and 2.7.0 (Watt) "));
+  Serial.println(negative.get_power());
 
 #ifdef HAVE_MQTT
   // Use simple application/x-www-form-urlencoded format.
   mqttClient.beginMessage(mqtt_topic);
   mqttClient.print("device_id=");
   mqttClient.print(guid);
-#endif
-
-  Serial.print("pushing device: ");
-  Serial.println(identification);
-  Serial.print("pushing 1.8.0 (Wh) ");
-  Serial.print(positive.get_energy_total());
-  Serial.print(" and 1.7.0 (Watt) ");
-  Serial.println(positive.get_power());
-  Serial.print("pushing 2.8.0 (Wh) ");
-  Serial.print(negative.get_energy_total());
-  Serial.print(" and 2.7.0 (Watt) ");
-  Serial.println(negative.get_power());
-
-#ifdef HAVE_MQTT
-  // FIXME: we definitely need the "1.8.0" in here too
-  mqttClient.print("&watthour[0]=");
+  mqttClient.print("&e_pos_act_energy_wh=");
   mqttClient.print(positive.get_energy_total());
-  mqttClient.print("&watt[0]=");
+  mqttClient.print("&e_pos_inst_power_w=");
   mqttClient.print(positive.get_power());
-  mqttClient.print("&watthour[1]=");
+  mqttClient.print("&e_neg_act_energy_wh=");
   mqttClient.print(negative.get_energy_total());
-  mqttClient.print("&watt[1]=");
+  mqttClient.print("&e_neg_inst_power_w=");
   mqttClient.print(negative.get_power());
-#endif
-
-  Serial.print(F("pushing uptime: "));
-  Serial.println(millis());
-#ifdef HAVE_MQTT
-  mqttClient.print(F("&uptime="));
+  mqttClient.print("&dbg_uptime=");
   mqttClient.print(millis());
-  mqttClient.print(F("&pulse_low="));
+  mqttClient.print("&dbg_pulse=");
   mqttClient.print(pulse_low);
-  mqttClient.print(F("&pulse_high="));
+  mqttClient.print("..");
   mqttClient.print(pulse_high);
   mqttClient.endMessage();
 #endif
