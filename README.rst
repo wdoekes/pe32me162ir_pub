@@ -154,10 +154,6 @@ Consecutive publishes look like::
       watthour[1]=1&watt[1]=0.00&uptime=54170&
       pulse_low=8&pulse_high=205
 
-(Except for the second publish, which will not have the ``watt[0]`` and
-``watt[1]`` values, because they are calculated from a delta, and the
-second publish doesn't have two values to compare yet.)
-
 **BEWARE: The MQTT message format is not well thought out nor
 standardized. I will change it at some point without prior notice! 😈**
 

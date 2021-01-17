@@ -63,23 +63,13 @@ const int PIN_IR_TX = 10;       // digital pin 10
 /* Optionally, you may attach a light sensor diode (or photo transistor
  * or whatever) to analog pin A0 and have it monitor the red watt hour
  * pulse LED. This improves the current Watt calculation when the power
- * consumption is low. A pulse causes the sleep 60s to be cut short,
+ * consumption is low. A pulse causes the sleep to be cut short,
  * increasing the possibility that two consecutive readings are "right
  * after a new watt hour value."
  * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
  * > the pulse's width is 40 ms. */
 const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
-/* By leaving the interval between 30s and 60s, we can have 30s in
- * which to watch for a pulse LED: 30s/Wh-pulse == 120Wh-pulse/hour == 120Watt
- * I.e. for usage as low as 120Watt, we'll get a pulse in time.
- * And, if no pulse LED is connected, you'll simply get values every 60s.
- * Do note that the ISKRA ME-162 appears to time out slightly after 60s.
- * After that time it will not respond to our programming mode request, and
- * we'd (state change) timeout and go back to start.
- * (One advantage of the 30s, is that we get more granular Watt usage
- * during peak times.) */
-const int PUBLISH_INTERVAL_MIN = 30; // wait at least 30s before publish
-const int PUBLISH_INTERVAL_MAX = 58; // wait at most 58s before publish
+
 const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
 
 /* In config.h, you should have:
@@ -149,6 +139,9 @@ enum State {
 enum Obis {
   OBIS_C_1_0 = 0, // Meter serial number
   OBIS_F_F_0,     // Fatal error meter status
+  OBIS_0_9_1,     // Time (returns (hh:mm:ss))
+  OBIS_0_9_2,     // Date (returns (YY.MM.DD))
+  // We read these two in a loop, the rest are irrelevant to us.
   OBIS_1_8_0,     // Positive active energy (A+) total [Wh]
   OBIS_2_8_0,     // Negative active energy (A+) total [Wh]
 #if 0
@@ -161,19 +154,16 @@ enum Obis {
   OBIS_15_8_0,    // Total absolute active energy (= 1_8_0 + 2_8_0)
   // [...]
 #endif
-  OBIS_0_9_1,     // Time (returns (hh:mm:ss))
-  OBIS_0_9_2,     // Date (returns (YY.MM.DD))
   // alas: the ME-162 does not do "1.7.0" current Watt usage (returns (ERROR))
   OBIS_LAST
 };
 
 /* Keep in sync with the Obis enum! */
 const char *const Obis_[] = {
-  "C.1.0", "F.F", "1.8.0", "2.8.0",
+  "C.1.0", "F.F", "0.9.1", "0.9.2", "1.8.0", "2.8.0",
 #if 0
   "1.8.1", "1.8.2", "1.8.3", "1.8.4", "2.8.1", "15.8.0",
 #endif
-  "0.9.1", "0.9.2",
   "UNDEF"
 };
 
@@ -270,10 +260,9 @@ short pulse_low = 1023;
 short pulse_high = 0;
 
 Obis nextObis;
-long deltaValue[OBIS_LAST];
-long deltaTime[OBIS_LAST];
-long lastValue[OBIS_LAST];
-long lastTime[OBIS_LAST];
+WattGauge positive; /* feed it 1.8.0, get 1.7.0 */
+WattGauge negative; /* feed it 2.8.0, get 2.7.0 */
+long last_publish;
 
 
 void setup()
@@ -305,11 +294,10 @@ void setup()
   iskra_tx(S_SOH "B0" S_ETX "q");
 
   // Initial values
-  for (int i = 0; i < OBIS_LAST; ++i) {
-    deltaValue[i] = deltaTime[i] = lastValue[i] = lastTime[i] = -1;
-  }
+  pulse_low = 1023;
+  pulse_high = 0;
   state = nextState = STATE_WR_LOGIN;
-  lastStateChange = millis();
+  lastStateChange = last_publish = millis();
 }
 
 void loop()
@@ -461,50 +449,72 @@ void loop()
 
   /* Continuous: publish data to remote */
   case STATE_PUBLISH:
-    publish();
+    {
+      long tdelta_ms = (millis() - last_publish);
+      unsigned power_sum = positive.get_power() + negative.get_power(); /* Watt */
+      /* DEBUG */
+      Serial.print("current watt approximation: ");
+      Serial.println(power_sum);
+      /* Only push every 60s or every 30s when consumption is high. */
+      if (tdelta_ms >= 60000 ||
+            (tdelta_ms >= 30000 && power_sum >= 1000)) {
+        publish();
+        positive.reset();
+        negative.reset();
+        pulse_low = 1023;
+        pulse_high = 0;
+        last_publish = millis();
+      }
+    }
     nextState = STATE_SLEEP;
     break;
 
-  /* Continuous: sleep PUBLISH_INTERVAL_MIN before data fetch */
+  /* Continuous: just sleep a slight bit */
+  /* FIXME: this is not necessary: the pulse-wait will sleep 1000 or X+1000 */
   case STATE_SLEEP:
-    /* We need to sleep a lot, or else the Watt guestimate makes no sense
-     * for low Wh deltas. For 550W, we'll still only get 9.17 Wh per minute,
-     * so we'd oscillate between 9 (540W) and 10 (600W).
-     * However: if you monitor the Watt hour pulse LED, we can reduce
-     * the oscillations. */
-    delay(PUBLISH_INTERVAL_MIN * 1000);
-    pulse_low = 1023;
-    pulse_high = 0;
+#ifdef HAVE_MQTT
+    /* We don't publish faster than every 60s. So'll we'll need the
+     * mqttClient (and Wifi) to stay up. Calling this continuously
+     * doesn't hurt. */
+    mqttClient.poll();
+#endif
+    delay(200);
     nextState = STATE_WAIT_FOR_PULSE;
     break;
 
-  /* Continuous: listen for pulse up to PUBLISH_INTERVAL_MAX seconds */
+  /* Continuous: just sleep a slight bit */
   case STATE_WAIT_FOR_PULSE:
+    /* This is a mashup between simply doing the poll-for-new-totals
+     * every second, and only-a-poll-after-pulse:
+     * - polling every second or so gives us decent, but not awesome, averages
+     * - polling after a pulse gives us great averages
+     * But, the pulse may not work as we want once we have both positive
+     * and negative power counts. Also, it's nice if the device works
+     * without the extra pulse receiver.
+     * But, as long as a pulse receiver is available, it'll increase the
+     * accuracy of the averages. */
     {
-      const int max_wait = (
-        PUBLISH_INTERVAL_MAX - PUBLISH_INTERVAL_MIN) * 1000;
-      bool have_waited_max_time = (millis() - lastStateChange) >= max_wait;
+      /* Pulse or not, after one second it's time. */
+      bool have_waited_a_second = (millis() - lastStateChange) >= 1000;
       short val = analogRead(A0);
+      /* Debug information, sent over MQTT. */
       if (val < pulse_low) {
         pulse_low = val;
       } else if (val > pulse_high) {
         pulse_high = val;
       }
-      if (val >= PULSE_THRESHOLD) {
-        /* Sleep cut short, for better average calculations. */
-        Serial.print("pulse: Got value ");
-        Serial.println(val);
-        /* Add delay. It appears that after a Wh pulse, the meter takes at
-         * most 1000ms to update the Wh counter. Without this delay, we'd
-         * usually get the Wh count of the previous second, except
-         * sometimes. That effect caused seemingly random high and then
-         * low spikes in the Watt averages. */
-        delay(1000);
-
-        nextObis = OBIS_1_8_0;
-        nextState = STATE_WR_REQ_OBIS;
-      } else if (have_waited_max_time) {
-        /* Timeout waiting for pulse; no problem. */
+      if (val >= PULSE_THRESHOLD || have_waited_a_second) {
+        if (!have_waited_a_second) {
+          /* Sleep cut short, for better average calculations. */
+          Serial.print("pulse: Got value ");
+          Serial.println(val);
+          /* Add delay. It appears that after a Wh pulse, the meter takes at
+           * most 1000ms to update the Wh counter. Without this delay, we'd
+           * usually get the Wh count of the previous second, except
+           * sometimes. That effect caused seemingly random high and then
+           * low spikes in the Watt averages. */
+          delay(1000);
+        }
         nextObis = OBIS_1_8_0;
         nextState = STATE_WR_REQ_OBIS;
       }
@@ -603,6 +613,9 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
 
 void on_data_readout(const char *data, size_t end)
 {
+  struct obis_values_t vals;
+  long t = (millis() & 0x7fffffffL); /* make sure t is positive */
+
   /* Data between STX and ETX. It should look like:
    * > C.1.0(28342193)        // Meter serial number
    * > 0.0.0(28342193)        // Device address
@@ -615,6 +628,13 @@ void on_data_readout(const char *data, size_t end)
    * > F.F(0000000)           // Meter fatal error
    * > !                      // end-of-data
    * (With "\r\n" everywhere.) */
+  parse_data_readout(&vals, data);
+  /* Ooh. The first samples are in! */
+  positive.set_watthour(t, vals.values[OBIS_1_8_0]);
+  negative.set_watthour(t, vals.values[OBIS_2_8_0]);
+
+  /* Keep this for debugging mostly. Bonus points if we also add current
+   * time 0.9.x */
   Serial.print(F("on_data_readout: ["));
   Serial.print(identification);
   Serial.print(F("]: "));
@@ -648,26 +668,17 @@ static void on_response(const char *data, size_t end, Obis obis)
   Serial.print(F("]: "));
   Serial.println(data);
 
-  if (end == 17 && data[0] == '(' && data[8] == '.' &&
-      memcmp(data + 12, "*kWh)", 5) == 0) {
-    long curValue = atol(data + 1) * 1000 + atol(data + 9);
+  if ((obis == OBIS_1_8_0 || obis == OBIS_2_8_0) && (
+        end == 17 && data[0] == '(' && data[8] == '.' &&
+      memcmp(data + 12, "*kWh)", 5) == 0)) {
+    long t = (millis() & 0x7fffffffL); /* make sure t is positive */
+    long watthour = atol(data + 1) * 1000 + atol(data + 9);
 
-    /* > This number will overflow (go back to zero), after approximately
-     * > 50 days.
-     * So, we'll do it sooner, but make sure we know about it. */
-    long curTime = (millis() & 0x3fffffffL);
-
-    if (lastValue[obis] >= 0) {
-      deltaValue[obis] = (curValue - lastValue[obis]);
-      deltaTime[obis] = (curTime - lastTime[obis]);
-      if (deltaValue[obis] < 0 || deltaTime[obis] < 0) {
-        deltaValue[obis] = deltaTime[obis] = -1;
-      }
-    } else {
-      deltaValue[obis] = deltaTime[obis] = -1;
+    if (obis == OBIS_1_8_0) {
+      positive.set_watthour(t, watthour);
+    } else if (obis == OBIS_2_8_0) {
+      negative.set_watthour(t, watthour);
     }
-    lastValue[obis] = curValue;
-    lastTime[obis] = curTime;
   }
 }
 
@@ -685,32 +696,26 @@ void publish()
 
   Serial.print("pushing device: ");
   Serial.println(identification);
-  for (int idx = OBIS_1_8_0; idx <= OBIS_2_8_0; ++idx) {
-    if (lastValue[idx] >= 0) {
-      Serial.print("pushing value: ");
-      Serial.println(lastValue[idx]);
+  Serial.print("pushing 1.8.0 (Wh) ");
+  Serial.print(positive.get_energy_total());
+  Serial.print(" and 1.7.0 (Watt) ");
+  Serial.println(positive.get_power());
+  Serial.print("pushing 2.8.0 (Wh) ");
+  Serial.print(negative.get_energy_total());
+  Serial.print(" and 2.7.0 (Watt) ");
+  Serial.println(negative.get_power());
+
 #ifdef HAVE_MQTT
-      // FIXME: we definitely need the "1.8.0" in here too
-      mqttClient.print("&watthour[");
-      mqttClient.print(idx - OBIS_1_8_0);
-      mqttClient.print("]=");
-      mqttClient.print(lastValue[idx]);
+  // FIXME: we definitely need the "1.8.0" in here too
+  mqttClient.print("&watthour[0]=");
+  mqttClient.print(positive.get_energy_total());
+  mqttClient.print("&watt[0]=");
+  mqttClient.print(positive.get_power());
+  mqttClient.print("&watthour[1]=");
+  mqttClient.print(negative.get_energy_total());
+  mqttClient.print("&watt[1]=");
+  mqttClient.print(negative.get_power());
 #endif
-    }
-    if (deltaTime[idx] > 0) {
-      // (Wh * 3600) == Ws; (Tms / 1000) == Ts; W == Ws / T
-      float watt = (deltaValue[idx] * 3600.0) / (deltaTime[idx] / 1000.0);
-      Serial.print("pushing watt: ");
-      Serial.println(watt);
-#ifdef HAVE_MQTT
-      // FIXME: we definitely need the "1.8.0" in here too
-      mqttClient.print("&watt[");
-      mqttClient.print(idx - OBIS_1_8_0);
-      mqttClient.print("]=");
-      mqttClient.print(watt);
-#endif
-    }
-  }
 
   Serial.print(F("pushing uptime: "));
   Serial.println(millis());
@@ -1060,38 +1065,6 @@ static void test_data_readout_to_obis()
   printf("\n");
 }
 
-void test_wattgauge()
-{
-  WattGauge positive;
-  positive.set_watthour(1000, 32826545);
-  positive.set_watthour(2000, 32826545);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 0);
-  positive.set_watthour(3000, 32826546);
-  positive.set_watthour(4000, 32826546);
-  positive.set_watthour(5000, 32826546);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 0);
-  positive.set_watthour(15000, 32826548);
-  positive.set_watthour(25000, 32826550);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 750);
-  positive.reset();
-  positive.set_watthour(30000, 32826552);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 750);
-  positive.set_watthour(35000, 32826554);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 750);
-  positive.set_watthour(40000, 32826556);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
-  positive.set_watthour(45000, 32826558);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
-  positive.reset();
-  positive.set_watthour(60000, 32826558);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
-  positive.set_watthour(90000, 32826559);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 1440);
-  positive.set_watthour(120000, 32826560);
-  INT_EQ("WattGauge.get_power", positive.get_power(), 96);
-  printf("\n");
-}
-
 int main()
 {
   test_cescape();
@@ -1101,12 +1074,12 @@ int main()
   test_wattgauge();
 
   on_hello("ISK5ME162-0033", 14, STATE_RD_IDENTIFICATION);
-  on_response("(0032826.545*kWh)", 17, OBIS_1_8_0);
-  printf("%ld - %ld - %ld\n",
-    lastValue[OBIS_1_8_0], deltaValue[OBIS_1_8_0], deltaTime[OBIS_1_8_0]);
-  on_response("(0032826.554*kWh)", 17, OBIS_1_8_0);
-  printf("%ld - %ld - %ld\n",
-    lastValue[OBIS_1_8_0], deltaValue[OBIS_1_8_0], deltaTime[OBIS_1_8_0]);
+//  on_response("(0032826.545*kWh)", 17, OBIS_1_8_0);
+//  printf("%ld - %ld - %ld\n",
+//    lastValue[OBIS_1_8_0], deltaValue[OBIS_1_8_0], deltaTime[OBIS_1_8_0]);
+//  on_response("(0032826.554*kWh)", 17, OBIS_1_8_0);
+//  printf("%ld - %ld - %ld\n",
+//    lastValue[OBIS_1_8_0], deltaValue[OBIS_1_8_0], deltaTime[OBIS_1_8_0]);
   publish();
   return 0;
 }

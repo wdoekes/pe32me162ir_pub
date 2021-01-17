@@ -18,6 +18,7 @@ public:
     PRINT_FUNCTION(double, "%g");
     PRINT_FUNCTION(float, "%f");
     PRINT_FUNCTION(int, "%d");
+    PRINT_FUNCTION(unsigned int, "%u");
     PRINT_FUNCTION(long, "%ld");
     PRINT_FUNCTION(unsigned long, "%ld");
 #undef PRINT_FUNCTION

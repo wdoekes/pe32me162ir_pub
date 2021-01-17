@@ -45,5 +45,7 @@ example.diff: example.log
 example.log: raw.log
 	./raw2example < raw.log > example.log
 
-pe32me162ir_pub.test: $(OBJECTS) WattGauge.h config.h
+$(OBJECTS): WattGauge.h config.h
+
+pe32me162ir_pub.test: $(OBJECTS)
 	$(LINK.cc) -o $@ $^
