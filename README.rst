@@ -151,7 +151,7 @@ Consecutive publishes look like::
     device_id=EUI48:11:22:33:44:55:66&
       e_pos_act_energy_wh=33134208&e_pos_inst_power_w=693&
       e_neg_act_energy_wh=1&e_neg_inst_power_w=0&
-      dbg_uptime=168355&dbg_pulse=16..148
+      dbg_uptime=168355
 
 Where the keys mean:
 
@@ -167,9 +167,11 @@ standardized. I will change it at some point without prior notice! 😈**
 The issue with the odd spikes
 -----------------------------
 
-(Note, the following issue was only relevant up until commit d844533.
+(Note, the following issue was only relevant up until commit `d844533
+<https://github.com/wdoekes/pe32me162ir_pub/commit/d84453351f3ede232571281e643d02eb6fb785e4>`_
 After that commit, visible LED pulses are not that important because we
-query the meter for totals every second.)
+query the meter for totals every second. You now need to enabled
+``OPTIONAL_LIGHT_SENSOR`` for this functionality.)
 
 Occasionally, we would see these odd spikes::
 

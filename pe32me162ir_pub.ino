@@ -10,7 +10,7 @@
  * - ESP8266 (NodeMCU, with Wifi) _or_ an Arduino (Uno?). Wifi/MQTT publish
  *   support is only(!) available for the ESP8266 at the moment.
  * - attach PIN_IR_RX<->RX, PIN_IR_TX<->TX, 3VC<->VCC (or 5VC), GND<->GND
- * - optionally, an analog light sensor to attach to A0<->SIG (and 3VC and GND)
+ * - (optional: analog light sensor to attach to A0<->SIG (and 3VC and GND))
  *
  * Building/dependencies:
  * - Arduino IDE
@@ -63,6 +63,8 @@ const int PIN_IR_RX = 9;        // digital pin 9
 const int PIN_IR_TX = 10;       // digital pin 10
 #endif
 
+//#define OPTIONAL_LIGHT_SENSOR
+#ifdef OPTIONAL_LIGHT_SENSOR
 /* Optionally, you may attach a light sensor diode (or photo transistor
  * or whatever) to analog pin A0 and have it monitor the red watt hour
  * pulse LED. This improves the current Watt calculation when the power
@@ -72,6 +74,7 @@ const int PIN_IR_TX = 10;       // digital pin 10
  * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
  * > the pulse's width is 40 ms. */
 const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
+#endif
 
 const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
 
@@ -257,10 +260,12 @@ char buffer_data[buffer_size + 1];
  * 3chars + 1char-baud + (optional) + 16char-ident */
 char identification[32];
 
+#ifdef OPTIONAL_LIGHT_SENSOR
 /* Record low and high pulse values so we can debug/monitor the light
  * sensor values from the MQTT data. */
 short pulse_low = 1023;
 short pulse_high = 0;
+#endif
 
 Obis nextObis;
 WattGauge positive; /* feed it 1.8.0, get 1.7.0 */
@@ -297,8 +302,6 @@ void setup()
   iskra_tx(S_SOH "B0" S_ETX "q");
 
   // Initial values
-  pulse_low = 1023;
-  pulse_high = 0;
   state = next_state = STATE_WR_LOGIN;
   last_statechange = last_publish = millis();
 }
@@ -484,8 +487,10 @@ void loop()
         publish();
         positive.reset();
         negative.reset();
+#ifdef OPTIONAL_LIGHT_SENSOR
         pulse_low = 1023;
         pulse_high = 0;
+#endif
         last_publish = millis();
       }
     }
@@ -494,6 +499,7 @@ void loop()
 
   /* Continuous: just sleep a slight bit */
   case STATE_SLEEP:
+#ifdef OPTIONAL_LIGHT_SENSOR
     /* This is a mashup between simply doing the poll-for-new-totals
      * every second, and only-a-poll-after-pulse:
      * - polling every second or so gives us decent, but not awesome, averages
@@ -526,6 +532,13 @@ void loop()
         next_state = STATE_WR_REQ_OBIS;
       }
     }
+#else
+    /* Wait 1.2s and then schedule a new request. */
+    if ((millis() - last_statechange) >= 1200) {
+      nextObis = OBIS_1_8_0;
+      next_state = STATE_WR_REQ_OBIS;
+    }
+#endif
     break;
   }
 
@@ -728,10 +741,12 @@ void publish()
   mqttClient.print(negative.get_power());
   mqttClient.print("&dbg_uptime=");
   mqttClient.print(millis());
+#ifdef OPTIONAL_LIGHT_SENSOR
   mqttClient.print("&dbg_pulse=");
   mqttClient.print(pulse_low);
   mqttClient.print("..");
   mqttClient.print(pulse_high);
+#endif
   mqttClient.endMessage();
 #endif
 }
