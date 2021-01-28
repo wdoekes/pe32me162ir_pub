@@ -113,7 +113,7 @@ const char mqtt_topic[] = "some/topic";
 # include <ESP8266WiFi.h>
 #endif
 
-#define VERSION "v0"
+#define VERSION "v1"
 
 
 enum State {
@@ -131,7 +131,7 @@ enum State {
   STATE_WR_REQ_OBIS,
   STATE_RD_RESP_OBIS,
 
-  STATE_PUBLISH,
+  STATE_MAYBE_PUBLISH,
   STATE_SLEEP
 };
 
@@ -150,6 +150,7 @@ enum Obis {
   OBIS_1_8_0,     // Positive active energy (A+) total [Wh]
   OBIS_2_8_0,     // Negative active energy (A+) total [Wh]
 #if 0
+  // Available in ME-162, but not that useful to us:
   OBIS_1_8_1,     // Positive active energy (A+) in tariff T1 [Wh]
   OBIS_1_8_2,     // Positive active energy (A+) in tariff T2 [Wh]
   OBIS_1_8_3,     // Positive active energy (A+) in tariff T3 [Wh]
@@ -157,9 +158,12 @@ enum Obis {
   OBIS_2_8_1,     // Negative active energy (A+) in tariff T1 [Wh]
   // [...]
   OBIS_15_8_0,    // Total absolute active energy (= 1_8_0 + 2_8_0)
-  // [...]
 #endif
-  // alas: the ME-162 does not do "1.7.0" current Watt usage (returns (ERROR))
+  // Alas, not in ME-162 (returns (ERROR) when queried):
+  //OBIS_1_7_0,   // Positive active instantaneous power (A+) [W]
+  //OBIS_2_7_0,   // Negative active instantaneous power (A+) [W]
+  //OBIS_16_7_0,  // Sum active instantaneous power [W] (= 1_7_0 - 2_7_0)
+  //OBIS_16_8_0,  // Sum of active energy without blockade (= 1_8_0 - 2_8_0)
   OBIS_LAST
 };
 
@@ -267,9 +271,8 @@ short pulse_low = 1023;
 short pulse_high = 0;
 #endif
 
-Obis nextObis;
-WattGauge positive; /* feed it 1.8.0, get 1.7.0 */
-WattGauge negative; /* feed it 2.8.0, get 2.7.0 */
+Obis next_obis;
+EnergyGauge gauge; /* feed it 1.8.0 and 2.8.0, get 1.7.0 and 2.7.0 */
 long last_publish;
 
 
@@ -443,7 +446,7 @@ void loop()
     write_state = state;
     {
       char buf[16];
-      snprintf(buf, 15, S_SOH "R1" S_STX "%s()" S_ETX, Obis2str(nextObis));
+      snprintf(buf, 15, S_SOH "R1" S_STX "%s()" S_ETX, Obis2str(next_obis));
       char bcc = din_66219_bcc(buf);
       int pos = strlen(buf);
       buf[pos] = bcc;
@@ -453,40 +456,36 @@ void loop()
     }
     break;
 
-  /* Continuous: publish data to remote */
-  case STATE_PUBLISH:
+  /* Continuous: maybe publish data to remote */
+  case STATE_MAYBE_PUBLISH:
 #ifdef HAVE_MQTT
     /* We don't necessarily publish every 60s, but we _do_ need to keep
      * the MQTT connection alive. poll() is safe to call often. */
     mqttClient.poll();
 #endif
     {
-      long tdelta_ms = (millis() - last_publish);
-      unsigned total_power_watt = (
-        positive.get_power() + negative.get_power());
-      unsigned is_significant_change = (
-        positive.get_power_change_factor() <= 0.6 ||
-        positive.get_power_change_factor() >= 1.6 ||
-        negative.get_power_change_factor() <= 0.6 ||
-        negative.get_power_change_factor() >= 1.6);
+      int tdelta_s = (millis() - last_publish) / 1000;
+      int power = gauge.get_instantaneous_power();
+
       /* DEBUG */
-      Serial.print("current watt approximation: ");
-      Serial.println(total_power_watt);
+      Serial.print("time to publish? ");
+      Serial.print(power);
+      Serial.print(" Watt, ");
+      Serial.print(tdelta_s);
+      Serial.print(" seconds");
+      if (gauge.has_significant_change())
+        Serial.println(", has significant change");
+      else
+        Serial.println();
+
       /* Only push every 120s or more often when there are significant
        * changes. */
-      if (tdelta_ms >= 120000 ||
-            (tdelta_ms >= 60000 && total_power_watt >= 400) ||
-            (tdelta_ms >= 25000 && is_significant_change)) {
-        /* DEBUG */
-        if (is_significant_change) {
-          Serial.print("significant change: ");
-          Serial.print(positive.get_power_change_factor());
-          Serial.print(" or ");
-          Serial.println(negative.get_power_change_factor());
-        }
+      if (tdelta_s >= 120 ||
+            /* power is higher than 400: then we have more detail */
+            (tdelta_s >= 60 && !(-400 < power && power < 400)) ||
+            (tdelta_s >= 25 && gauge.has_significant_change())) {
         publish();
-        positive.reset();
-        negative.reset();
+        gauge.reset();
 #ifdef OPTIONAL_LIGHT_SENSOR
         pulse_low = 1023;
         pulse_high = 0;
@@ -528,14 +527,14 @@ void loop()
            * low spikes in the Watt averages. */
           delay(1000);
         }
-        nextObis = OBIS_1_8_0;
+        next_obis = OBIS_1_8_0;
         next_state = STATE_WR_REQ_OBIS;
       }
     }
 #else
     /* Wait 1.2s and then schedule a new request. */
     if ((millis() - last_statechange) >= 1200) {
-      nextObis = OBIS_1_8_0;
+      next_obis = OBIS_1_8_0;
       next_state = STATE_WR_REQ_OBIS;
     }
 #endif
@@ -608,18 +607,18 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
 
   case STATE_RD_PROG_MODE_ACK:
     if (pos >= 6 && memcmp(data, (S_SOH "P0" S_STX "()"), 6) == 0) {
-      nextObis = OBIS_1_8_0;
+      next_obis = OBIS_1_8_0;
       return STATE_WR_REQ_OBIS;
     }
     return STATE_WR_PROG_MODE;
 
   case STATE_RD_RESP_OBIS:
-    on_response(data + 1, pos - 3, nextObis);
-    nextObis = (Obis)((int)nextObis + 1);
-    if (nextObis < OBIS_LAST) {
+    on_response(data + 1, pos - 3, next_obis);
+    next_obis = (Obis)((int)next_obis + 1);
+    if (next_obis < OBIS_LAST) {
       return STATE_WR_REQ_OBIS;
     }
-    return STATE_PUBLISH;
+    return STATE_MAYBE_PUBLISH;
 
   default:
     /* shouldn't get here.. */
@@ -648,8 +647,8 @@ void on_data_readout(const char *data, size_t end)
    * (With "\r\n" everywhere.) */
   parse_data_readout(&vals, data);
   /* Ooh. The first samples are in! */
-  positive.set_watthour(t, vals.values[OBIS_1_8_0]);
-  negative.set_watthour(t, vals.values[OBIS_2_8_0]);
+  gauge.set_positive_active_energy_total(t, vals.values[OBIS_1_8_0]);
+  gauge.set_negative_active_energy_total(t, vals.values[OBIS_2_8_0]);
 
   /* Keep this for debugging mostly. Bonus points if we also add current
    * time 0.9.x */
@@ -696,9 +695,9 @@ static void on_response(const char *data, size_t end, Obis obis)
     long watthour = atol(data + 1) * 1000 + atol(data + 9);
 
     if (obis == OBIS_1_8_0) {
-      positive.set_watthour(t, watthour);
+      gauge.set_positive_active_energy_total(t, watthour);
     } else if (obis == OBIS_2_8_0) {
-      negative.set_watthour(t, watthour);
+      gauge.set_negative_active_energy_total(t, watthour);
     }
   }
 }
@@ -717,14 +716,13 @@ void publish()
   ensure_wifi();
   ensure_mqtt();
 
-  Serial.print(F("pushing: 1.8.0 (Wh) "));
-  Serial.print(positive.get_energy_total());
-  Serial.print(F(" and 1.7.0 (Watt) "));
-  Serial.println(positive.get_power());
-  Serial.print(F("pushing: 2.8.0 (Wh) "));
-  Serial.print(negative.get_energy_total());
-  Serial.print(F(" and 2.7.0 (Watt) "));
-  Serial.println(negative.get_power());
+  Serial.print(F("pushing: [1.8.0] "));
+  Serial.print(gauge.get_positive_active_energy_total());
+  Serial.print(F(" Wh, [2.8.0] "));
+  Serial.print(gauge.get_negative_active_energy_total());
+  Serial.print(F(" Wh, [16.7.0] "));
+  Serial.print(gauge.get_instantaneous_power());
+  Serial.println(F(" Watt"));
 
 #ifdef HAVE_MQTT
   // Use simple application/x-www-form-urlencoded format.
@@ -732,13 +730,11 @@ void publish()
   mqttClient.print("device_id=");
   mqttClient.print(guid);
   mqttClient.print("&e_pos_act_energy_wh=");
-  mqttClient.print(positive.get_energy_total());
-  mqttClient.print("&e_pos_inst_power_w=");
-  mqttClient.print(positive.get_power());
+  mqttClient.print(gauge.get_positive_active_energy_total());
   mqttClient.print("&e_neg_act_energy_wh=");
-  mqttClient.print(negative.get_energy_total());
-  mqttClient.print("&e_neg_inst_power_w=");
-  mqttClient.print(negative.get_power());
+  mqttClient.print(gauge.get_negative_active_energy_total());
+  mqttClient.print("&e_inst_power_w=");
+  mqttClient.print(gauge.get_instantaneous_power());
   mqttClient.print("&dbg_uptime=");
   mqttClient.print(millis());
 #ifdef OPTIONAL_LIGHT_SENSOR

@@ -30,14 +30,14 @@
  *   prod = WattGauge()
  *
  *   // Running this more often will get better averages.
- *   schedule_every_second(
- *        function() { prod.set_watthour(millis(), get_watthour()) })
+ *   schedule_every_second(function() {
+ *       prod.set_active_energy_total(millis(), get_watthour()) })
  *
  *   // Running this less often will get better averages;
  *   // .. but you're free to get_watt()/reset() whenever you like;
  *   // .. and an interval of 15s is fine for higher wattage (>1500).
- *   schedule_every_x_seconds(
- *      function() { push(prod.get_power()); prod.reset(); }
+ *   schedule_every_x_seconds(function() {
+ *       push(prod.get_instantaneous_power()); prod.reset(); }
  */
 class WattGauge
 {
@@ -47,7 +47,6 @@ private:
     long _p0;       /* first watt hour in a series */
     long _plast;    /* latest watt hour (1 wh = 3600 joule) */
     unsigned _watt; /* average value, but only if it makes some sense */
-    unsigned _wprev; /* previous value, to compare against */
 
     /* _tdelta can be negative when the time wraps! */
     inline long _tdelta() { return _tlast - _t0; }
@@ -77,40 +76,22 @@ public:
     WattGauge() : _t0(-1), _watt(0) {}
 
     /* Get the latest stored value in watt hours */
-    inline long get_energy_total() {
+    inline long get_active_energy_total() {
         return _plast;
     }
 
     /* Get a best guess of the current power usage in watt */
-    inline unsigned get_power() {
+    inline unsigned get_instantaneous_power() {
         return _watt;
     }
 
-    /* Compare current average with previous */
-    inline float get_power_change_factor() {
-        if (_wprev == 0) {
-            if (_watt < 20)
-                return 1.0; /* no change */
-            return 5.0;
-        }
-        float factor = (float)_watt / (float)_wprev;
-        return factor;
-    }
-
-    /* After reading get_power() you'll generally want to reset the
-     * state to start a new measurement interval */
-    inline void reset() {
-        if (_there_are_enough_values()) {
-            /* We don't touch the _watt average. Also note that we update to
-             * the latest time-in-which-there-was-a-change. */
-            _t0 = _tlast;
-            _p0 = _plast;
-            _wprev = _watt;
-        }
+    /* Is there anything report for this interval? */
+    inline bool has_any_change() {
+        return _p0 != _plast;
     }
 
     /* Feed data to the WattGauge: do this often */
-    inline void set_watthour(long time_ms, long current_wh) {
+    inline void set_active_energy_total(long time_ms, long current_wh) {
         if (current_wh == _plast) {
             /* Do nothing and especially not update averages */
         } else {
@@ -128,6 +109,79 @@ public:
             }
         }
     }
+
+    /* After reading get_instantaneous_power() you'll generally want to reset the
+     * state to start a new measurement interval */
+    inline void reset() {
+        if (_there_are_enough_values()) {
+            /* We don't touch the _watt average. Also note that we update to
+             * the latest time-in-which-there-was-a-change. */
+            _t0 = _tlast;
+            _p0 = _plast;
+        }
+    }
+};
+
+/**
+ * EnergyGauge combines two WattGauge gauges to monitor both positive
+ * and negative energy.
+ *
+ * The combination is needed because a proper estimate for either can
+ * only be given if the other is known to have a 0-delta.
+ */
+class EnergyGauge
+{
+private:
+    WattGauge _positive;
+    WattGauge _negative;
+    int _wprev;
+
+public:
+    EnergyGauge() {};
+    inline long get_positive_active_energy_total() {
+        return _positive.get_active_energy_total();
+    }
+    inline long get_negative_active_energy_total() {
+        return _negative.get_active_energy_total();
+    }
+    inline int get_instantaneous_power() {
+        int watt = 0;
+        if (_positive.has_any_change() or !_negative.has_any_change()) {
+            watt += _positive.get_instantaneous_power();
+        }
+        if (_negative.has_any_change() or !_positive.has_any_change()) {
+            watt -= _negative.get_instantaneous_power();
+        }
+        return watt;
+    }
+    inline bool has_significant_change() {
+        int watt = get_instantaneous_power();
+        if ((_wprev < 0 && watt > 0) || (watt < 0 && _wprev > 0)) {
+            return true; /* sign change is significant */
+        } else if (_wprev == 0 && (-20 < watt && watt < 20)) {
+            return false; /* fluctuating around 0 is not significant */
+        } else if (_wprev == 0) {
+            return true; /* otherwise a change from 0 is significant */
+        }
+        float factor = (float)watt / (float)_wprev;
+        if (0.6 < factor && factor < 1.6) {
+            return false; /* change factor is small */
+        }
+        return true; /* yes, significant */
+    }
+    inline void set_positive_active_energy_total(
+            long time_ms, long current_wh) {
+        _positive.set_active_energy_total(time_ms, current_wh);
+    }
+    inline void set_negative_active_energy_total(
+            long time_ms, long current_wh) {
+        _negative.set_active_energy_total(time_ms, current_wh);
+    }
+    inline void reset() {
+        _wprev = get_instantaneous_power();
+        _positive.reset();
+        _negative.reset();
+    }
 };
 
 #ifdef TEST_BUILD
@@ -137,7 +191,7 @@ extern "C" int printf(const char *, ...);
 extern "C" int atoi(const char *) throw ();
 extern "C" int strcmp(const char *s1, const char *s2) throw();
 
-static void test_wattgauge()
+void _test_wattgauge()
 {
   struct { const char *const tm; long val; } data[] = {
     // At t = 0
@@ -380,9 +434,13 @@ static void test_wattgauge()
   for (int i = 0; data[i].tm; ++i) {
     const char *const tm = data[i].tm;
     if (strcmp(tm, "TEST") == 0) {
-        INT_EQ("test_wattgauge(cur)", positive.get_power(), data[i].val);
+        INT_EQ(
+            "test_wattgauge(cur)",
+            positive.get_instantaneous_power(), data[i].val);
     } else if (strcmp(tm, "RESET") == 0) {
-        INT_EQ("test_wattgauge(push)", positive.get_power(), data[i].val);
+        INT_EQ(
+            "test_wattgauge(push)",
+            positive.get_instantaneous_power(), data[i].val);
         positive.reset();
     } else {
         long ms = (
@@ -390,13 +448,222 @@ static void test_wattgauge()
             atoi(tm + 3) * 1000 * 60 +
             atoi(tm + 6) * 1000 +
             atoi(tm + 9));
-        positive.set_watthour(ms, data[i].val);
+        positive.set_active_energy_total(ms, data[i].val);
         //printf("%s: %ld Wh %u Watt (%fx)\n",
-        //    tm, data[i].val, positive.get_power(),
-        //    positive.get_power_change_factor());
+        //    tm, data[i].val, positive.get_instantaneous_power(),
+        //    positive.get_instantaneous_power_change_factor());
     }
   }
   printf("\n");
+}
+
+void _test_energygauge()
+{
+  struct { const char *const tm; long val; } data[] = {
+    // At t = 0
+    {"19:14:24.280", 33268826}, // push after Hello
+    {"19:14:26.239", 33268827},
+    {"19:14:28.066", 33268827},
+    {"19:14:29.892", 33268827},
+    {"19:14:31.719", 33268827},
+    {"19:14:33.545", 33268827},
+    {"19:14:35.372", 33268827},
+    {"19:14:37.231", 33268828},
+    {"19:14:39.058", 33268828},
+    {"19:14:40.885", 33268828},
+    {"19:14:42.712", 33268828},
+    {"19:14:44.538", 33268828},
+    {"19:14:46.365", 33268828},
+    {"19:14:48.192", 33268829},
+    {"19:14:50.019", 33268829},
+    {"19:14:51.850", 33268829},
+    {"19:14:53.677", 33268829},
+    {"19:14:55.504", 33268829},
+    {"HAS_CHANGE", 1}, /* but, Watt is still none */
+    {"TEST", 0},
+    {"19:14:57.330", 33268829},
+    {"19:14:59.157", 33268829},
+    {"19:15:00.984", 33268830},
+    {"19:15:02.811", 33268830},
+    {"19:15:04.638", 33268830},
+    {"19:15:06.465", 33268830},
+    {"19:15:08.292", 33268830},
+    {"19:15:10.119", 33268830},
+    {"19:15:11.945", 33268831},
+    {"19:15:13.775", 33268831},
+    {"19:15:15.603", 33268831},
+    {"19:15:17.430", 33268831},
+    {"19:15:19.256", 33268831},
+    {"19:15:21.082", 33268831},
+    {"19:15:22.908", 33268831},
+    {"TEST", 0},
+    {"19:15:24.743", 33268832},
+    {"HAS_CHANGE", 1},
+    {"RESET", 357},
+    {"HAS_CHANGE", 0},
+    {"19:15:26.576", 33268832},
+    {"19:15:28.412", 33268832},
+    {"19:15:30.245", 33268832},
+    {"19:15:32.076", 33268832},
+    {"19:15:33.912", 33268832},
+    {"19:15:35.713", 33268833},
+    {"19:15:37.545", 33268833},
+    {"19:15:39.378", 33268833},
+    {"19:15:41.211", 33268833},
+    {"19:15:43.044", 33268833},
+    {"19:15:44.875", 33268833},
+    {"19:15:46.708", 33268834},
+    {"19:15:48.540", 33268834},
+    {"19:15:50.370", 33268834},
+    {"19:15:52.168", 33268834},
+    {"19:15:53.999", 33268834},
+    {"19:15:55.830", 33268834},
+    {"19:15:57.662", 33268835},
+    {"19:15:59.493", 33268835},
+    {"19:16:01.325", 33268835},
+    {"19:16:03.154", 33268835},
+    {"19:16:04.984", 33268835},
+    {"19:16:06.815", 33268835},
+    {"19:16:08.646", 33268836},
+    {"19:16:10.478", 33268836},
+    {"19:16:12.308", 33268836},
+    {"19:16:14.110", 33268836},
+    {"19:16:15.945", 33268836},
+    {"19:16:17.778", 33268836},
+    {"19:16:19.610", 33268837},
+    {"19:16:21.443", 33268837},
+    {"19:16:23.247", 33268837},
+    {"19:16:25.078", 33268837},
+    {"19:16:26.910", 33268837},
+    {"19:16:28.743", 33268837},
+    {"19:16:30.577", 33268838},
+    {"19:16:32.410", 33268838},
+    {"19:16:34.242", 33268838},
+    {"19:16:36.073", 33268838},
+    {"19:16:37.870", 33268838},
+    {"19:16:39.701", 33268839},
+    {"19:16:41.532", 33268839},
+    {"19:16:43.364", 33268839},
+    {"19:16:45.194", 33268839},
+    {"19:16:47.025", 33268839},
+    {"19:16:48.856", 33268839},
+    {"19:16:50.686", 33268840},
+    {"19:16:52.516", 33268840},
+    {"19:16:54.347", 33268840},
+    {"19:16:56.177", 33268840},
+    {"19:16:58.007", 33268840},
+    {"19:16:59.836", 33268840},
+    {"19:17:01.633", 33268841},
+    {"19:17:03.462", 33268841},
+    {"19:17:05.293", 33268841},
+    {"19:17:07.122", 33268841},
+    {"19:17:08.954", 33268841},
+    {"19:17:10.785", 33268841},
+    {"19:17:12.616", 33268842},
+    {"19:17:14.446", 33268842},
+    {"19:17:16.276", 33268842},
+    {"19:17:18.112", 33268842},
+    {"19:17:19.944", 33268842},
+    {"19:17:21.774", 33268842},
+    {"19:17:23.572", 33268843},
+    {"19:17:25.403", 33268843},
+    {"HAS_CHANGE", 0},
+    {"RESET", 333},
+    {"19:17:27.235", 33268843},
+    {"19:17:29.066", 33268843},
+    {"19:17:30.896", 33268843},
+    {"19:17:32.727", 33268843},
+    {"19:17:34.558", 33268844},
+    {"19:17:36.385", 33268844},
+    {"19:17:38.217", 33268844},
+    {"19:17:40.048", 33268844},
+    {"19:17:41.878", 33268844},
+    {"19:17:43.708", 33268844},
+    {"19:17:45.509", 33268845},
+    {"19:17:47.343", 33268845},
+    {"19:17:49.175", 33268846},
+    {"19:17:51.006", 33268846},
+    {"19:17:52.836", 33268848},
+    {"HAS_CHANGE", 0},
+    {"19:17:54.665", 33268849},
+    {"HAS_CHANGE", 1},
+    {"RESET", 694},
+    {"19:17:56.496", 33268850},
+    {"19:17:58.326", 33268852},
+    {"19:18:00.157", 33268853},
+    {"19:18:01.988", 33268854},
+    {"19:18:03.819", 33268855},
+    {"19:18:05.649", 33268857},
+    {"19:18:07.481", 33268858},
+    {"19:18:09.313", 33268859},
+    {"19:18:11.145", 33268861},
+    {"19:18:12.944", 33268861},
+    {"19:18:14.774", 33268863},
+    {"19:18:16.609", 33268864},
+    {"19:18:18.438", 33268865},
+    {"19:18:20.268", 33268867},
+    {"RESET", 2530},
+    {"19:18:22.098", 33268868},
+    {"19:18:23.929", 33268869},
+    {"19:18:25.760", 33268870},
+    {"19:18:27.591", 33268872},
+    {"19:18:29.422", 33268873},
+    {"19:18:31.250", 33268874},
+    {"19:18:33.080", 33268876},
+    {"19:18:34.910", 33268876},
+    {"19:18:36.741", 33268878},
+    {"19:18:38.572", 33268879},
+    {"19:18:40.400", 33268881},
+    {"19:18:42.228", 33268882},
+    {"19:18:44.057", 33268883},
+    {"19:18:45.888", 33268884},
+    {"19:18:47.685", 33268885},
+    {"19:18:49.513", 33268887},
+    {"19:18:51.342", 33268888},
+    {"19:18:53.173", 33268889},
+    {"HAS_CHANGE", 0},
+    {"TEST", 2406},
+    {0, 0}
+  };
+
+  EnergyGauge gauge;
+  for (int i = 0; data[i].tm; ++i) {
+    const char *const tm = data[i].tm;
+    if (strcmp(tm, "TEST") == 0) {
+        INT_EQ(
+            "test_energygauge(cur)",
+            gauge.get_instantaneous_power(), data[i].val);
+    } else if (strcmp(tm, "HAS_CHANGE") == 0) {
+        INT_EQ(
+            "test_energygauge(has-change)",
+            gauge.has_significant_change(), data[i].val);
+        gauge.reset();
+    } else if (strcmp(tm, "RESET") == 0) {
+        INT_EQ(
+            "test_energygauge(push)",
+            gauge.get_instantaneous_power(), data[i].val);
+        gauge.reset();
+    } else {
+        long ms = (
+            atoi(tm + 0) * 1000 * 3600 +
+            atoi(tm + 3) * 1000 * 60 +
+            atoi(tm + 6) * 1000 +
+            atoi(tm + 9));
+        gauge.set_positive_active_energy_total(ms, data[i].val);
+        gauge.set_negative_active_energy_total(ms, 7784);
+        //printf("%s: %ld Wh %u Watt (has-change=%s)\n",
+        //    tm, data[i].val, gauge.get_instantaneous_power(),
+        //    (gauge.has_significant_change() ? "YES" : "no"));
+    }
+  }
+
+  printf("\n");
+}
+
+static void test_wattgauge()
+{
+    _test_wattgauge();
+    _test_energygauge();
 }
 #endif
 
