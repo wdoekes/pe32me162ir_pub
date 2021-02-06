@@ -984,7 +984,7 @@ static int STR_EQ(const char *func, const char *got, const char *expected)
     return 1;
   } else {
     printf("FAIL (%s): \"\"\"%s\"\"\" != \"\"\"%s\"\"\"\n",
-        func, expected, got);
+        func, got, expected);
     return 0;
   }
 }
@@ -995,7 +995,7 @@ static int INT_EQ(const char *func, int got, int expected)
     printf("OK (%s): %d\n", func, expected);
     return 1;
   } else {
-    printf("FAIL (%s): %d != %d\n", func, expected, got);
+    printf("FAIL (%s): %d != %d\n", func, got, expected);
     return 0;
   }
 }
