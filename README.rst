@@ -163,9 +163,9 @@ The issue with the odd spikes
 -----------------------------
 
 (Note, the following issue was only relevant up until commit `d844533
-<https://github.com/wdoekes/pe32me162ir_pub/commit/d84453351f3ede232571281e643d02eb6fb785e4>`_
+<https://github.com/wdoekes/pe32me162ir_pub/commit/d84453351f3ede232571281e643d02eb6fb785e4>`_.
 After that commit, visible LED pulses are not that important because we
-query the meter for totals every second. You now need to enabled
+query the meter for totals every second. You'd now need to enable
 ``OPTIONAL_LIGHT_SENSOR`` for this functionality.)
 
 Occasionally, we would see these odd spikes::

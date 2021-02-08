@@ -28,7 +28,7 @@ OBJECTS = pe32me162ir_pub.o
 
 # --- Test mode ---
 CXX = g++
-CPPFLAGS = -DTEST_BUILD
+CPPFLAGS = -DTEST_BUILD -g
 CXXFLAGS = -Wall -Os
 
 test: ./pe32me162ir_pub.test

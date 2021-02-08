@@ -113,7 +113,7 @@ const char mqtt_topic[] = "some/topic";
 # include <ESP8266WiFi.h>
 #endif
 
-#define VERSION "v1"
+#define VERSION "v2"
 
 
 enum State {
@@ -681,9 +681,7 @@ void on_data_readout(const char *data, size_t end)
 static void on_response(const char *data, size_t end, Obis obis)
 {
   /* (0032835.698*kWh) */
-  Serial.print(F("on_response: ["));
-  Serial.print(identification);
-  Serial.print(F(", "));
+  Serial.print(F("on_response["));
   Serial.print(Obis2str(obis));
   Serial.print(F("]: "));
   Serial.println(data);
