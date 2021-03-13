@@ -1,7 +1,7 @@
-#ifndef INCLUDED_BOGOSERIAL_H
-#define INCLUDED_BOGOSERIAL_H
+#ifndef INCLUDED_BOGO_SERIAL_H
+#define INCLUDED_BOGO_SERIAL_H
 
-#include "BogoArduino.h"
+#include "Arduino.h"
 
 class BogoSerial {
 public:
@@ -30,4 +30,4 @@ public:
 
 static BogoSerial Serial;
 
-#endif //INCLUDED_BOGOSERIAL_H
+#endif //INCLUDED_BOGO_SERIAL_H

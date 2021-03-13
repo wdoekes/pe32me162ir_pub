@@ -100,9 +100,8 @@ const char mqtt_topic[] = "some/topic";
 # define SoftwareSerial CustomSoftwareSerial
 # define SWSERIAL_7E1 CSERIAL_7E1
 #elif defined(TEST_BUILD)
-# include "BogoArduino.h"
-# include "BogoSoftwareSerial.h"
-# include "BogoSerial.h"
+# include <Arduino.h>
+# include <SoftwareSerial.h>
 #else
 # error Unsupported platform
 #endif
