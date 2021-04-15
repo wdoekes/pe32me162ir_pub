@@ -1,3 +1,10 @@
+/* Define MQTT_TLS to use TLS with pinned certificate for secure MQTT. Put the
+ * SHA1 fingerprint of the server certificate in arduino_secrets.h. */
+//#define MQTT_TLS
+/* Define MQTT_AUTH to use password authentication (only valid when
+ * MQTT_TLS is set). */
+//#define MQTT_AUTH
+
 /* Optionally, if you define OPTIONAL_LIGHT_SENSOR, you may attach a light
  * sensor diode (or photo transistor or whatever) to analog pin A0 and have it
  * monitor the red watt hour pulse LED. This improves the current Watt

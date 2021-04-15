@@ -214,10 +214,27 @@ const char C_ENDL = '\n';
 static char guid[24] = "<no_wifi_found>"; // "EUI48:11:22:33:44:55:66"
 
 #ifdef HAVE_WIFI
+# ifdef MQTT_TLS
+WiFiClientSecure wifiClient;
+# else
 WiFiClient wifiClient;
-#ifdef HAVE_MQTT
+# endif
+# ifdef HAVE_MQTT
 MqttClient mqttClient(wifiClient);
+# endif
 #endif
+
+#ifdef MQTT_TLS
+static const uint8_t mqtt_fingerprint[20] PROGMEM = SECRET_MQTT_FINGERPRINT;
+#endif
+
+#ifdef MQTT_AUTH
+# ifndef MQTT_TLS
+#  error MQTT_AUTH requires MQTT_TLS
+# else
+DECLARE_PGM_CHAR_P(mqtt_user, SECRET_MQTT_USER);
+DECLARE_PGM_CHAR_P(mqtt_pass, SECRET_MQTT_PASS);
+# endif
 #endif
 
 /* We need a (Custom)SoftwareSerial because the Arduino Uno does not do
@@ -271,6 +288,12 @@ void setup()
 #ifdef HAVE_WIFI
   strncpy(guid, "EUI48:", 6);
   strncpy(guid + 6, WiFi.macAddress().c_str(), sizeof(guid) - (6 + 1));
+# ifdef MQTT_TLS
+  wifiClient.setFingerprint(mqtt_fingerprint);
+# endif
+# ifdef MQTT_AUTH
+  mqttClient.setUsernamePassword(mqtt_user, mqtt_pass);
+# endif
 #endif
 
   pinMode(PIN_IR_RX, INPUT);
