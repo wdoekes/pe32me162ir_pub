@@ -42,15 +42,15 @@
 class WattGauge
 {
 private:
-    long _t[3];     /* t0, t(end-1), t(end) */
-    long _p[3];     /* P(sum) in t[n] */
-    long _tlast;    /* latest time, even without changed data */
-    int _watt;      /* average value, but only if it makes some sense */
+    unsigned long _t[3];  /* t0, t(end-1), t(end) */
+    unsigned long _p[3];  /* P(sum) in t[n] */
+    unsigned long _tlast; /* latest time, even without changed data */
+    int _watt;            /* average value, but only if it makes some sense */
+    bool _data_valid;     /* Are the contents of _t and _p valid? Always true
+                             after first sample. */
 
-    /* _tdelta can be negative when the time wraps! */
-    inline long _tdelta() { return _t[2] - _t[0]; }
-    /* _pdelta should never be negative */
-    inline long _pdelta() { return _p[2] - _p[0]; }
+    inline unsigned long _tdelta() { return _t[2] - _t[0]; }
+    inline unsigned long _pdelta() { return _p[2] - _p[0]; }
 
     /* Are there enough values to make any reasonable estimate?
      * - Minimum sampling interval: 20s
@@ -65,17 +65,17 @@ private:
     /* Recalculate watt usage, but only if there are enough values */
     inline void _recalculate_if_sensible() {
         if (_there_are_enough_values()) {
-            _watt = (_pdelta() * 1000L * 3600L / _tdelta());
+            _watt = (_pdelta() * 1000UL * 3600UL / _tdelta());
         } else if ((_tlast - _t[0]) > 300000) {
             _watt = 0;
         }
     }
 
 public:
-    WattGauge() : _watt(0) { _t[0] = _t[1] = _t[2] = -1; }
+    WattGauge() : _watt(0), _data_valid(false) {}
 
     /* Get the latest stored value in watt hours */
-    inline long get_active_energy_total() {
+    inline unsigned long get_active_energy_total() {
         return _p[2];
     }
 
@@ -85,19 +85,21 @@ public:
     }
 
     /* Is there anything report for this interval? */
-    inline long interval_since_last_change() {
+    inline unsigned long interval_since_last_change() {
         return (_tlast - _t[2]);
     }
 
     /* Feed data to the WattGauge: do this often */
-    void set_active_energy_total(long time_ms, long current_wh) {
+    void set_active_energy_total(
+            unsigned long time_ms, unsigned long current_wh) {
         _tlast = time_ms;
 
         /* Happens only once after construction */
-        if (_t[0] == -1) {
+        if (!_data_valid) {
             _t[0] = _t[1] = _t[2] = time_ms;
             _p[0] = _p[1] = _p[2] = current_wh;
             _watt = 0;
+            _data_valid = true;
             return;
         }
 
@@ -171,10 +173,10 @@ private:
 
 public:
     EnergyGauge() : _wprev(0) {};
-    inline long get_positive_active_energy_total() {
+    inline unsigned long get_positive_active_energy_total() {
         return _positive.get_active_energy_total();
     }
-    inline long get_negative_active_energy_total() {
+    inline unsigned long get_negative_active_energy_total() {
         return _negative.get_active_energy_total();
     }
     inline int get_instantaneous_power() {
@@ -201,11 +203,11 @@ public:
         return true; /* yes, significant */
     }
     inline void set_positive_active_energy_total(
-            long time_ms, long current_wh) {
+            unsigned long time_ms, unsigned long current_wh) {
         _positive.set_active_energy_total(time_ms, current_wh);
     }
     inline void set_negative_active_energy_total(
-            long time_ms, long current_wh) {
+            unsigned long time_ms, unsigned long current_wh) {
         _negative.set_active_energy_total(time_ms, current_wh);
     }
     inline void reset() {
@@ -224,7 +226,7 @@ extern "C" int strcmp(const char *s1, const char *s2) throw();
 
 static void _test_wattgauge()
 {
-  struct { const char *const tm; long val; } data[] = {
+  struct { const char *const tm; unsigned long val; } data[] = {
     // At t = 0
     {"10:10:07.264", 33130232}, // <- p[0]
     {"10:10:09.223", 33130233},
@@ -474,7 +476,7 @@ static void _test_wattgauge()
             positive.get_instantaneous_power(), data[i].val);
         positive.reset();
     } else {
-        long ms = (
+        unsigned long ms = (
             atoi(tm + 0) * 1000 * 3600 +
             atoi(tm + 3) * 1000 * 60 +
             atoi(tm + 6) * 1000 +
@@ -491,7 +493,7 @@ static void _test_wattgauge()
 
 static void _test_energygauge()
 {
-  struct { const char *const tm; long val; } data[] = {
+  struct { const char *const tm; int val; } data[] = {
     // At t = 0
     {"HAS_CHANGE", 0},
     {"TEST", 0},
@@ -683,7 +685,7 @@ static void _test_energygauge()
             gauge.get_instantaneous_power(), data[i].val);
         gauge.reset();
     } else {
-        long ms = (
+        unsigned long ms = (
             atoi(tm + 0) * 1000 * 3600 +
             atoi(tm + 3) * 1000 * 60 +
             atoi(tm + 6) * 1000 +
@@ -703,7 +705,7 @@ static void _test_energygauge()
 
 static void _test_energygauge_around_zero()
 {
-  struct { const char *const tm; bool pos; long val; } data[] = {
+  struct { const char *const tm; bool pos; int val; } data[] = {
     // At t = 0
     {"14:44:57.177", true, 33378152},
     {"14:44:57.477", false, 12865},
@@ -874,7 +876,7 @@ static void _test_energygauge_around_zero()
             gauge.get_instantaneous_power(), data[i].val);
         gauge.reset();
     } else {
-        long ms = (
+        unsigned long ms = (
             atoi(tm + 0) * 1000 * 3600 +
             atoi(tm + 3) * 1000 * 60 +
             atoi(tm + 6) * 1000 +
