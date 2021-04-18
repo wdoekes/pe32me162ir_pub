@@ -250,7 +250,7 @@ SoftwareSerial iskra(PIN_IR_RX, PIN_IR_TX, false);
 
 /* Current state, scheduled state, current "write" state for retries */
 State state, next_state, write_state;
-long last_statechange;
+unsigned long last_statechange;
 
 /* Storage for incoming data. If the data readout is larger than this size
  * bytes, then the rest of the code won't cope. (The observed data is at most
@@ -272,7 +272,7 @@ short pulse_high = 0;
 
 Obis next_obis;
 EnergyGauge gauge; /* feed it 1.8.0 and 2.8.0, get 1.7.0 and 2.7.0 */
-long last_publish;
+unsigned long last_publish;
 
 
 void setup()
@@ -630,7 +630,7 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
 void on_data_readout(const char *data, size_t end)
 {
   struct obis_values_t vals;
-  long t = (millis() & 0x7fffffffL); /* make sure t is positive */
+  unsigned long t = millis();
 
   /* Data between STX and ETX. It should look like:
    * > C.1.0(28342193)        // Meter serial number
@@ -688,7 +688,7 @@ static void on_response(const char *data, size_t end, Obis obis)
   if ((obis == OBIS_1_8_0 || obis == OBIS_2_8_0) && (
         end == 17 && data[0] == '(' && data[8] == '.' &&
       memcmp(data + 12, "*kWh)", 5) == 0)) {
-    long t = (millis() & 0x7fffffffL); /* make sure t is positive */
+    unsigned long t = millis();
     long watthour = atol(data + 1) * 1000 + atol(data + 9);
 
     if (obis == OBIS_1_8_0) {
