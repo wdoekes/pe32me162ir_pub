@@ -1,0 +1,3 @@
+[submodule "bogoduino"]
+	path = bogoduino
+	url = https://github.com/wdoekes/bogoduino.git

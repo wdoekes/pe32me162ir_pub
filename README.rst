@@ -159,6 +159,27 @@ Where the keys mean:
 - e_inst_power_w (16.7.0) = Sum of active instantaneous power [Watt]
 
 
+Local testing
+-------------
+
+For testing/compiling while developing, we use the *bogoduino*
+submodule::
+
+    $ git submodule init
+    Submodule 'bogoduino' (https://github.com/wdoekes/bogoduino.git) registered for path 'bogoduino'
+
+    $ git submodule update
+    Cloning into 'pe32me162ir_pub/bogoduino'...
+    Submodule path 'bogoduino': checked out '7bec2a5'
+
+Now you can run ``make`` to run some test code::
+
+    $ make
+    ./pe32me162ir_pub.test
+    OK (cescape): """a"""
+    ...
+
+
 The issue with the odd spikes
 -----------------------------
 
