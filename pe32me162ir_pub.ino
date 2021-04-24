@@ -222,6 +222,12 @@ static inline void trace_rx_buffer();
 static inline int memcmp_cstr(const char *s1, const char *s2, size_t len) {
   return memcmp(s1, s2, len);
 }
+/* Neat trick to let us do multiple Serial.print() using the << operator:
+ * Serial << x << " " << y << LF; */
+template<class T> inline Print &operator << (Print &obj, T arg) {
+  obj.print(arg);
+  return obj;
+};
 
 /* Events */
 static State on_data_block_or_data_set(char *data, size_t pos, State st);
@@ -242,6 +248,9 @@ const char C_ACK = '\x06';
 #define    S_ACK   "\x06"
 const char C_NAK = '\x15';
 #define    S_NAK   "\x15"
+
+const char C_ENDL = '\n';
+#define    S_ENDL   "\n"
 
 /* We use the guid to store something unique to identify the device by.
  * For now, we'll populate it with the ESP8266 Wifi MAC address,
@@ -313,8 +322,7 @@ void setup()
 
   // Welcome message
   delay(200); /* tiny sleep to avoid dupe log after double restart */
-  Serial.print(F("Booted pe32me162ir_pub " VERSION " guid "));
-  Serial.println(guid);
+  Serial << F("Booted pe32me162ir_pub " VERSION " guid ") << guid << C_ENDL;
 
   // Initial connect (if available)
   ensure_wifi();
@@ -357,10 +365,10 @@ void loop()
           /* On the Arduino Uno, we tend to three of these after sending
            * STATE_WR_LOGIN (at 300 baud), before reception. */
         } else if (buffer_pos == 0 && ch == 0x7f) {
-          Serial.println(F("<< (skipping 0x7f)")); // only observed on Arduino
+          Serial << F("<< (skipping 0x7f)" S_ENDL); // only observed on Arduino
 #endif
         } else if (ch == '\0') {
-          Serial.println(F("<< (unexpected NUL, ignoring)"));
+          Serial << F("<< (unexpected NUL, ignoring)" S_ENDL);
         } else {
           buffer_data[buffer_pos++] = ch;
           buffer_data[buffer_pos] = '\0';
@@ -415,16 +423,16 @@ void loop()
           /* On the Arduino Uno, we tend to six of these after sending
            * STATE_WR_REQ_OBIS (at 9600 baud), before reception. */
         } else if (buffer_pos == 0 && ch == 0x7f) {
-          Serial.println(F("<< (skipping 0x7f)")); // only observed on Arduino
+          Serial << F("<< (skipping 0x7f)" S_ENDL); // only observed on Arduino
 #endif
         } else if (ch == '\0') {
-          Serial.println(F("<< (unexpected NUL, ignoring)"));
+          Serial << F("<< (unexpected NUL, ignoring)" S_ENDL);
         } else {
           buffer_data[buffer_pos++] = ch;
           buffer_data[buffer_pos] = '\0';
         }
         if (ch == C_NAK) {
-          Serial.print(F("<< "));
+          Serial << F("<< ");
           serial_print_cescape(buffer_data);
           next_state = write_state;
           buffer_pos = 0;
@@ -434,14 +442,13 @@ void loop()
           /* If the last non-BCC token is EOT, we should send an ACK
            * to get the rest. But seeing that message ends with ETX, we
            * should not ACK. */
-          Serial.print(F("<< "));
+          Serial << F("<< ");
           serial_print_cescape(buffer_data);
 
           /* We're looking at a BCC now. Validate. */
           int res = din_66219_bcc(buffer_data);
           if (res < 0) {
-            Serial.print(F("bcc fail: "));
-            Serial.println(res);
+            Serial << F("bcc fail: ") << res << C_ENDL;
             /* Hope for a restransmit. Reset buffer. */
             buffer_pos = 0;
             break;
@@ -500,15 +507,11 @@ void loop()
       int power = gauge.get_instantaneous_power();
 
       /* DEBUG */
-      Serial.print(F("time to publish? "));
-      Serial.print(power);
-      Serial.print(F(" Watt, "));
-      Serial.print(tdelta_s);
-      Serial.print(F(" seconds"));
+      Serial << F("time to publish? ") << power <<
+          F(" Watt, ") << tdelta_s << F(" seconds");
       if (gauge.has_significant_change())
-        Serial.println(F(", has significant change"));
-      else
-        Serial.println();
+        Serial << F(", has significant change");
+      Serial << C_ENDL;
 
       /* Only push every 120s or more often when there are significant
        * changes. */
@@ -550,8 +553,7 @@ void loop()
       if (val >= PULSE_THRESHOLD || have_waited_a_second) {
         if (!have_waited_a_second) {
           /* Sleep cut short, for better average calculations. */
-          Serial.print(F("pulse: Got value "));
-          Serial.println(val);
+          Serial << F("pulse: Got value ") << val << C_ENDL;
           /* Add delay. It appears that after a Wh pulse, the meter takes at
            * most 1000ms to update the Wh counter. Without this delay, we'd
            * usually get the Wh count of the previous second, except
@@ -577,24 +579,19 @@ void loop()
   if (state == next_state &&
       (millis() - last_statechange) > (STATE_CHANGE_TIMEOUT * 1000)) {
     if (buffer_pos) {
-      Serial.print(F("<< (stale buffer sized "));
-      Serial.print(buffer_pos);
-      Serial.print(F(") "));
+      Serial << F("<< (stale buffer sized ") << buffer_pos << F(") ");
       serial_print_cescape(buffer_data);
     }
     /* Note that after having been connected, it may take up to a minute
      * before a new connection can be established. So we may end up here
      * a few times before reconnecting for real. */
-    Serial.println(F("timeout: State change took to long, resetting..."));
+    Serial << F("timeout: State change took to long, resetting..." S_ENDL);
     next_state = STATE_WR_LOGIN;
   }
 
   /* Handle state change */
   if (state != next_state) {
-    Serial.print(F("state: "));
-    Serial.print(state);
-    Serial.print(F(" -> "));
-    Serial.println(next_state);
+    Serial << F("state: ") << state << F(" -> ") << next_state << C_ENDL;
     state = next_state;
     buffer_pos = 0;
     last_statechange = millis();
@@ -603,12 +600,11 @@ void loop()
 
 State on_hello(const char *data, size_t end, State st)
 {
-  /* buffer_data = "ISK5ME162-0033" (ISKRA ME-162)
+  /* buffer_data = "ISK5ME162-0033" (ISKRA ME-162) (no "/" or "\r\n")
    * - uppercase 'K' means slow-ish (200ms (not 20ms) response times)
    * - (for protocol mode C) suggest baud '5'
    *   (0=300, 1=600, 2=1200, 3=2400, 4=4800, 5=9600, 6=19200) */
-  Serial.print(F("on_hello: "));
-  Serial.println(data); // "ISK5ME162-0033" (without '/' nor "\r\n")
+  Serial << F("on_hello: ") << data << C_ENDL;
 
   /* Store identification string */
   identification[sizeof(identification - 1)] = '\0';
@@ -684,10 +680,8 @@ void on_data_readout(const char *data, size_t /*end*/)
 
   /* Keep this for debugging mostly. Bonus points if we also add current
    * time 0.9.x */
-  Serial.print(F("on_data_readout: ["));
-  Serial.print(identification);
-  Serial.print(F("]: "));
-  Serial.print(data);
+  Serial << F("on_data_readout: [") << identification << F("]: ") <<
+    data << C_ENDL;
 
   ensure_wifi();
   ensure_mqtt();
@@ -713,10 +707,8 @@ void on_data_readout(const char *data, size_t /*end*/)
 static void on_response(const char *data, size_t end, Obis obis)
 {
   /* (0032835.698*kWh) */
-  Serial.print(F("on_response["));
-  Serial.print(Obis2str(obis));
-  Serial.print(F("]: "));
-  Serial.println(data);
+  Serial << F("on_response[") << Obis2str(obis) << F("]: ") <<
+    data << C_ENDL;
 
   if ((obis == OBIS_1_8_0 || obis == OBIS_2_8_0) && (
         end == 17 && data[0] == '(' && data[8] == '.' &&
@@ -746,13 +738,11 @@ void publish()
   ensure_wifi();
   ensure_mqtt();
 
-  Serial.print(F("pushing: [1.8.0] "));
-  Serial.print(gauge.get_positive_active_energy_total());
-  Serial.print(F(" Wh, [2.8.0] "));
-  Serial.print(gauge.get_negative_active_energy_total());
-  Serial.print(F(" Wh, [16.7.0] "));
-  Serial.print(gauge.get_instantaneous_power());
-  Serial.println(F(" Watt"));
+  Serial <<
+    F("pushing: [1.8.0] ") << gauge.get_positive_active_energy_total() <<
+    F(" Wh, [2.8.0] ") << gauge.get_negative_active_energy_total() <<
+    F(" Wh, [16.7.0] ") << gauge.get_instantaneous_power() <<
+    F(" Watt" S_ENDL);
 
 #ifdef HAVE_MQTT
   // Use simple application/x-www-form-urlencoded format.
@@ -783,9 +773,9 @@ template<class T> static inline void serial_print_cescape(const T *p)
   const T *restart = p;
   do {
     restart = cescape(buf, restart, 200);
-    Serial.print(buf);
+    Serial << buf;
   } while (restart != NULL);
-  Serial.println();
+  Serial << C_ENDL;
 }
 
 template<class T> static inline void iskra_tx(const T *p)
@@ -797,7 +787,7 @@ template<class T> static inline void iskra_tx(const T *p)
   delay(20); /* on my local ME-162, delay(20) is sufficient */
 
   /* Delay before debug print; makes more sense in monitor logs. */
-  Serial.print(F(">> "));
+  Serial << F(">> ");
   serial_print_cescape(p);
 
   iskra.print(p);
@@ -822,9 +812,8 @@ static inline void trace_rx_buffer()
    * 13:43:46.725 -> << /ISK (cont)
    * ... */
   if (buffer_pos) {
-    Serial.print(F("<< "));
-    Serial.print(buffer_data); // no cescape here for speed
-    Serial.println(F(" (cont)"));
+    /* No cescape() this time, for performance reasons. */
+    Serial << F("<< ") << buffer_data << F(" (cont)" S_ENDL);
   }
 #endif
 }
@@ -844,14 +833,10 @@ static void ensure_wifi()
       delay(1000);
     }
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print(F("Wifi UP on \""));
-      Serial.print(wifi_ssid);
-      Serial.print(F("\", Local IP: "));
-      Serial.println(WiFi.localIP());
+      Serial << F("Wifi UP on \"") << wifi_ssid << F("\", Local IP: ") <<
+        WiFi.localIP() << C_ENDL;
     } else {
-      Serial.print(F("Wifi NOT UP on \""));
-      Serial.print(wifi_ssid);
-      Serial.println(F("\"."));
+      Serial << F("Wifi NOT UP on \"") << wifi_ssid << F("\"." S_ENDL);
     }
   }
 }
@@ -864,13 +849,10 @@ static void ensure_mqtt()
   mqttClient.poll();
   if (!mqttClient.connected()) {
     if (mqttClient.connect(mqtt_broker, mqtt_port)) {
-      Serial.print(F("MQTT connected: "));
-      Serial.println(mqtt_broker);
+      Serial << F("MQTT connected: ") << mqtt_broker << C_ENDL;
     } else {
-      Serial.print(F("MQTT connection to "));
-      Serial.print(mqtt_broker);
-      Serial.print(F(" failed! Error code = "));
-      Serial.println(mqttClient.connectError());
+      Serial << F("MQTT connection to ") << mqtt_broker <<
+        F(" failed! Error code = ") << mqttClient.connectError() << C_ENDL;
     }
   }
 }
