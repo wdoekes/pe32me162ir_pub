@@ -48,19 +48,19 @@
  *   1.8.0 and 2.8.0
  */
 
-#if defined(ARDUINO_ARCH_ESP8266)
 /* On the ESP8266, the baud rate needs to be sufficiently high so it
  * doesn't affect the SoftwareSerial. (Probably because this Serial is
- * synchronous?) */
-const int SERMON_BAUD = 115200; // serial monitor for debugging
-const int PIN_IR_RX = 5;        // D1 / GPIO5
-const int PIN_IR_TX = 4;        // D2 / GPIO4
+ * blocking/serial? 9600 is too low.)
+ * On the Arduino Uno, the baud rate is free to choose. Just make sure
+ * you don't try to cram large values into a 16-bits int. */
+const long SERMON_BAUD = 115200; // serial monitor for debugging
+
+#if defined(ARDUINO_ARCH_ESP8266)
+const int PIN_IR_RX = 5;  // D1 / GPIO5
+const int PIN_IR_TX = 4;  // D2 / GPIO4
 #else /*defined(ARDUINO_ARCH_AVR)*/
-/* On the Arduino Uno, the baud rate needs to be exactly 9600. If we
- * increase it, the CustomSoftwareSerial starts communicating crap. */
-const int SERMON_BAUD = 9600;   // serial monitor for debugging
-const int PIN_IR_RX = 9;        // digital pin 9
-const int PIN_IR_TX = 10;       // digital pin 10
+const int PIN_IR_RX = 9;  // digital pin 9
+const int PIN_IR_TX = 10; // digital pin 10
 #endif
 
 //#define OPTIONAL_LIGHT_SENSOR
