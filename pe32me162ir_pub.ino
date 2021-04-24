@@ -43,9 +43,6 @@
  * TODO:
  * - clean up debug
  * - add/standardize first MQTT push (with data_readout and date and time)
- * - test whether losing the LED is now impact-less
- * - check if we need to split/separate publishing (and resetting of)
- *   1.8.0 and 2.8.0
  */
 
 /* On the ESP8266, the baud rate needs to be sufficiently high so it
@@ -63,7 +60,7 @@ const int PIN_IR_RX = 9;  // digital pin 9
 const int PIN_IR_TX = 10; // digital pin 10
 #endif
 
-//#define OPTIONAL_LIGHT_SENSOR
+/* You can #define OPTIONAL_LIGHT_SENSOR in config.h */
 #ifdef OPTIONAL_LIGHT_SENSOR
 /* Optionally, you may attach a light sensor diode (or photo transistor
  * or whatever) to analog pin A0 and have it monitor the red watt hour
@@ -74,7 +71,7 @@ const int PIN_IR_TX = 10; // digital pin 10
  * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
  * > the pulse's width is 40 ms. */
 const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
-#endif
+#endif //OPTIONAL_LIGHT_SENSOR
 
 const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
 
@@ -94,6 +91,7 @@ const char mqtt_topic[] = "some/topic";
 # include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
 # include <SoftwareSerial.h>
 # define HAVE_MQTT
+# define HAVE_WIFI
 #elif defined(ARDUINO_ARCH_AVR)
 # include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
 # include <CustomSoftwareSerial.h>
@@ -107,12 +105,14 @@ const char mqtt_topic[] = "some/topic";
 #endif
 
 /* Include files specific to Wifi/MQTT */
-#ifdef HAVE_MQTT
-# include <ArduinoMqttClient.h>
+#ifdef HAVE_WIFI
 # include <ESP8266WiFi.h>
+# ifdef HAVE_MQTT
+#  include <ArduinoMqttClient.h>
+# endif
 #endif
 
-#define VERSION "v2"
+#define VERSION "v3~pre2"
 
 
 enum State {
@@ -190,7 +190,7 @@ inline const char *Obis2str(Obis obis) { return Obis_[obis]; }
 /* Parse data readout buffer and populate obis_values_t */
 static void parse_data_readout(struct obis_values_t *dst, const char *src);
 
-#ifdef HAVE_MQTT
+#ifdef HAVE_MQTT /* and HAVE_WIFI */
 static void ensure_wifi();
 static void ensure_mqtt();
 #else
@@ -228,9 +228,11 @@ const char C_NAK = '\x15';
  * if available. */
 static char guid[24] = "<no_wifi_found>"; // "EUI48:11:22:33:44:55:66"
 
-#ifdef HAVE_MQTT
+#ifdef HAVE_WIFI
 WiFiClient wifiClient;
+#ifdef HAVE_MQTT
 MqttClient mqttClient(wifiClient);
+#endif
 #endif
 
 /* We need a (Custom)SoftwareSerial because the Arduino Uno does not do
@@ -268,7 +270,7 @@ char identification[32];
  * sensor values from the MQTT data. */
 short pulse_low = 1023;
 short pulse_high = 0;
-#endif
+#endif //OPTIONAL_LIGHT_SENSOR
 
 Obis next_obis;
 EnergyGauge gauge; /* feed it 1.8.0 and 2.8.0, get 1.7.0 and 2.7.0 */
@@ -281,7 +283,7 @@ void setup()
   while (!Serial)
     delay(0);
 
-#ifdef HAVE_MQTT
+#ifdef HAVE_WIFI
   strncpy(guid, "EUI48:", 6);
   strncpy(guid + 6, WiFi.macAddress().c_str(), sizeof(guid) - (6 + 1));
 #endif
@@ -330,14 +332,15 @@ void loop()
     if (iskra.available()) {
       while (iskra.available() && buffer_pos < buffer_size) {
         char ch = iskra.read();
-        /* We've received (at least three) 0x7f's at the start. Ignore
-         * all of them, as we won't expect them in the hello anyway. */
-        if (buffer_pos == 0 && ch == 0x7f) {
+        if (0) {
 #if defined(ARDUINO_ARCH_AVR)
+          /* On the Arduino Uno, we tend to three of these after sending
+           * STATE_WR_LOGIN (at 300 baud), before reception. */
+        } else if (buffer_pos == 0 && ch == 0x7f) {
           Serial.println(F("<< (skipping 0x7f)")); // only observed on Arduino
 #endif
         } else if (ch == '\0') {
-          Serial.println(F("<< (unexpected NUL, ignoring"));
+          Serial.println(F("<< (unexpected NUL, ignoring)"));
         } else {
           buffer_data[buffer_pos++] = ch;
           buffer_data[buffer_pos] = '\0';
@@ -387,9 +390,11 @@ void loop()
     if (iskra.available()) {
       while (iskra.available() && buffer_pos < buffer_size) {
         char ch = iskra.read();
-        /* We'll receive some 0x7f's at the start. Ignore them. */
-        if (buffer_pos == 0 && ch == 0x7f) {
+        if (0) {
 #if defined(ARDUINO_ARCH_AVR)
+          /* On the Arduino Uno, we tend to six of these after sending
+           * STATE_WR_REQ_OBIS (at 9600 baud), before reception. */
+        } else if (buffer_pos == 0 && ch == 0x7f) {
           Serial.println(F("<< (skipping 0x7f)")); // only observed on Arduino
 #endif
         } else if (ch == '\0') {
@@ -530,13 +535,13 @@ void loop()
         next_state = STATE_WR_REQ_OBIS;
       }
     }
-#else
+#else //!OPTIONAL_LIGHT_SENSOR
     /* Wait 1.2s and then schedule a new request. */
     if ((millis() - last_statechange) >= 1200) {
       next_obis = OBIS_1_8_0;
       next_state = STATE_WR_REQ_OBIS;
     }
-#endif
+#endif //!OPTIONAL_LIGHT_SENSOR
     break;
   }
 
@@ -627,7 +632,7 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
   return st;
 }
 
-void on_data_readout(const char *data, size_t end)
+void on_data_readout(const char *data, size_t /*end*/)
 {
   struct obis_values_t vals;
   unsigned long t = millis();
@@ -674,7 +679,7 @@ void on_data_readout(const char *data, size_t end)
   // FIXME: replace CRLF in data with ", ". replace "&" with ";"
   mqttClient.print(data); // FIXME: unformatted data..
   mqttClient.endMessage();
-#endif
+#endif //HAVE_MQTT
 }
 
 static void on_response(const char *data, size_t end, Obis obis)
@@ -739,9 +744,9 @@ void publish()
   mqttClient.print(pulse_low);
   mqttClient.print("..");
   mqttClient.print(pulse_high);
-#endif
+#endif //OPTIONAL_LIGHT_SENSOR
   mqttClient.endMessage();
-#endif
+#endif //HAVE_MQTT
 }
 
 static inline void serial_print_cescape(const char *p)
@@ -781,6 +786,13 @@ static inline void trace_rx_buffer()
    * longer receive buffer).
    * Solution: no tracing. */
 #else
+  /* On the Arduino Uno, we will see this kind of receive buildup,
+   * but only during the 300 baud connect handshake.
+   * 13:43:46.625 -> << / (cont)
+   * 13:43:46.658 -> << /I (cont)
+   * 13:43:46.692 -> << /IS (cont)
+   * 13:43:46.725 -> << /ISK (cont)
+   * ... */
   if (buffer_pos) {
     Serial.print(F("<< "));
     Serial.print(buffer_data); // no cescape here for speed
@@ -789,7 +801,7 @@ static inline void trace_rx_buffer()
 #endif
 }
 
-#ifdef HAVE_MQTT
+#ifdef HAVE_MQTT /* and HAVE_WIFI */
 /**
  * Check that Wifi is up, or connect when not connected.
  */
@@ -815,9 +827,7 @@ static void ensure_wifi()
     }
   }
 }
-#endif // HAVE_MQTT
 
-#ifdef HAVE_MQTT
 /**
  * Check that the MQTT connection is up or connect if it isn't.
  */
@@ -836,7 +846,7 @@ static void ensure_mqtt()
     }
   }
 }
-#endif // HAVE_MQTT
+#endif //HAVE_MQTT
 
 /**
  * C-escape, for improved serial monitor readability
@@ -1097,7 +1107,6 @@ int main()
   publish();
   return 0;
 }
-
-#endif
+#endif //TEST_BUILD
 
 /* vim: set ts=8 sw=2 sts=2 et ai: */
