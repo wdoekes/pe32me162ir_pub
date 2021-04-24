@@ -50,14 +50,14 @@
  * blocking/serial? 9600 is too low.)
  * On the Arduino Uno, the baud rate is free to choose. Just make sure
  * you don't try to cram large values into a 16-bits int. */
-const long SERMON_BAUD = 115200; // serial monitor for debugging
+static const long SERMON_BAUD = 115200; // serial monitor for debugging
 
 #if defined(ARDUINO_ARCH_ESP8266)
-const int PIN_IR_RX = 5;  // D1 / GPIO5
-const int PIN_IR_TX = 4;  // D2 / GPIO4
+static const int PIN_IR_RX = 5;  // D1 / GPIO5
+static const int PIN_IR_TX = 4;  // D2 / GPIO4
 #else /*defined(ARDUINO_ARCH_AVR)*/
-const int PIN_IR_RX = 9;  // digital pin 9
-const int PIN_IR_TX = 10; // digital pin 10
+static const int PIN_IR_RX = 9;  // digital pin 9
+static const int PIN_IR_TX = 10; // digital pin 10
 #endif
 
 /* You can #define OPTIONAL_LIGHT_SENSOR in config.h */
@@ -472,13 +472,13 @@ void loop()
       int power = gauge.get_instantaneous_power();
 
       /* DEBUG */
-      Serial.print("time to publish? ");
+      Serial.print(F("time to publish? "));
       Serial.print(power);
-      Serial.print(" Watt, ");
+      Serial.print(F(" Watt, "));
       Serial.print(tdelta_s);
-      Serial.print(" seconds");
+      Serial.print(F(" seconds"));
       if (gauge.has_significant_change())
-        Serial.println(", has significant change");
+        Serial.println(F(", has significant change"));
       else
         Serial.println();
 
@@ -522,7 +522,7 @@ void loop()
       if (val >= PULSE_THRESHOLD || have_waited_a_second) {
         if (!have_waited_a_second) {
           /* Sleep cut short, for better average calculations. */
-          Serial.print("pulse: Got value ");
+          Serial.print(F("pulse: Got value "));
           Serial.println(val);
           /* Add delay. It appears that after a Wh pulse, the meter takes at
            * most 1000ms to update the Wh counter. Without this delay, we'd
@@ -551,7 +551,7 @@ void loop()
     if (buffer_pos) {
       Serial.print(F("<< (stale buffer sized "));
       Serial.print(buffer_pos);
-      Serial.print(") ");
+      Serial.print(F(") "));
       serial_print_cescape(buffer_data);
     }
     /* Note that after having been connected, it may take up to a minute
@@ -669,13 +669,13 @@ void on_data_readout(const char *data, size_t /*end*/)
   // FIXME: NOTE: This is limited to 256 chars in MqttClient.cpp
   // (TX_PAYLOAD_BUFFER_SIZE).
   mqttClient.beginMessage(mqtt_topic);
-  mqttClient.print("device_id=");
+  mqttClient.print(F("device_id="));
   mqttClient.print(guid);
   // FIXME: move identification to another message; the one where we
   // also add 0.9.1 and 0.9.2
-  mqttClient.print("&id=");
+  mqttClient.print(F("&id="));
   mqttClient.print(identification);
-  mqttClient.print("&DATA=");
+  mqttClient.print(F("&DATA="));
   // FIXME: replace CRLF in data with ", ". replace "&" with ";"
   mqttClient.print(data); // FIXME: unformatted data..
   mqttClient.endMessage();
@@ -729,20 +729,20 @@ void publish()
 #ifdef HAVE_MQTT
   // Use simple application/x-www-form-urlencoded format.
   mqttClient.beginMessage(mqtt_topic);
-  mqttClient.print("device_id=");
+  mqttClient.print(F("device_id="));
   mqttClient.print(guid);
-  mqttClient.print("&e_pos_act_energy_wh=");
+  mqttClient.print(F("&e_pos_act_energy_wh="));
   mqttClient.print(gauge.get_positive_active_energy_total());
-  mqttClient.print("&e_neg_act_energy_wh=");
+  mqttClient.print(F("&e_neg_act_energy_wh="));
   mqttClient.print(gauge.get_negative_active_energy_total());
-  mqttClient.print("&e_inst_power_w=");
+  mqttClient.print(F("&e_inst_power_w="));
   mqttClient.print(gauge.get_instantaneous_power());
-  mqttClient.print("&dbg_uptime=");
+  mqttClient.print(F("&dbg_uptime="));
   mqttClient.print(millis());
 #ifdef OPTIONAL_LIGHT_SENSOR
-  mqttClient.print("&dbg_pulse=");
+  mqttClient.print(F("&dbg_pulse="));
   mqttClient.print(pulse_low);
-  mqttClient.print("..");
+  mqttClient.print(F(".."));
   mqttClient.print(pulse_high);
 #endif //OPTIONAL_LIGHT_SENSOR
   mqttClient.endMessage();
@@ -816,14 +816,14 @@ static void ensure_wifi()
       delay(1000);
     }
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("Wifi UP on \"");
+      Serial.print(F("Wifi UP on \""));
       Serial.print(wifi_ssid);
-      Serial.print("\", Local IP: ");
+      Serial.print(F("\", Local IP: "));
       Serial.println(WiFi.localIP());
     } else {
-      Serial.print("Wifi NOT UP on \"");
+      Serial.print(F("Wifi NOT UP on \""));
       Serial.print(wifi_ssid);
-      Serial.println("\".");
+      Serial.println(F("\"."));
     }
   }
 }
@@ -836,12 +836,12 @@ static void ensure_mqtt()
   mqttClient.poll();
   if (!mqttClient.connected()) {
     if (mqttClient.connect(mqtt_broker, mqtt_port)) {
-      Serial.print("MQTT connected: ");
+      Serial.print(F("MQTT connected: "));
       Serial.println(mqtt_broker);
     } else {
-      Serial.print("MQTT connection to ");
+      Serial.print(F("MQTT connection to "));
       Serial.print(mqtt_broker);
-      Serial.print(" failed! Error code = ");
+      Serial.print(F(" failed! Error code = "));
       Serial.println(mqttClient.connectError());
     }
   }
