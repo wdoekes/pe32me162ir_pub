@@ -112,6 +112,13 @@ const char mqtt_topic[] = "some/topic";
 # endif
 #endif
 
+/* Load PROGMEM macro to store global constants in program/flash memory.
+ * We define the AS_MEM_CSTR and AS_PGM_CSTR macros to cast the globals
+ * back and from a __FlashStringHelper to get some type-safety. */
+#include <avr/pgmspace.h>
+#define AS_MEM_CSTR(x) reinterpret_cast<const char*>(x)
+#define AS_PGM_CSTR(x) reinterpret_cast<const __FlashStringHelper*>(x)
+
 #define VERSION "v3~pre2"
 
 
@@ -180,7 +187,12 @@ struct obis_values_t {
 };
 
 /* C-escape, for improved serial monitor readability */
-static const char *cescape(char *buffer, const char *p, size_t maxlen);
+static const char *cescape(
+    char *buffer, const char *p, size_t maxlen, bool progmem = false);
+static inline const __FlashStringHelper *cescape(
+    char *buffer, const __FlashStringHelper *p, size_t maxlen) {
+  return AS_PGM_CSTR(cescape(buffer, AS_MEM_CSTR(p), maxlen, true));
+}
 /* Calculate and (optionally) check block check character (BCC) */
 static int din_66219_bcc(const char *s);
 /* Convert string to Obis number or OBIS_LAST if not found */
@@ -199,9 +211,13 @@ static inline void ensure_mqtt() {} /* noop */
 #endif
 
 /* Helpers */
-static inline void iskra_tx(const char *p);
-static inline void serial_print_cescape(const char *p);
+template<class T> static inline void iskra_tx(const T *p);
+template<class T> static inline void serial_print_cescape(const T *p);
 static inline void trace_rx_buffer();
+/* Helper to add a little type safety to memcmp. */
+static inline int memcmp_cstr(const char *s1, const char *s2, size_t len) {
+  return memcmp(s1, s2, len);
+}
 
 /* Events */
 static State on_data_block_or_data_set(char *data, size_t pos, State st);
@@ -303,7 +319,7 @@ void setup()
   // Send termination command, in case we were already connected and
   // in 9600 baud previously.
   iskra.begin(9600, SWSERIAL_7E1);
-  iskra_tx(S_SOH "B0" S_ETX "q");
+  iskra_tx(F(S_SOH "B0" S_ETX "q"));
 
   // Initial values
   state = next_state = STATE_WR_LOGIN;
@@ -321,7 +337,7 @@ void loop()
     /* Communication starts at 300 baud, at 1+7+1+1=10 bits/septet. So, for
      * 30 septets/second, we could wait 33.3ms when there is nothing. */
     iskra.begin(300, SWSERIAL_7E1);
-    iskra_tx("/?!\r\n");
+    iskra_tx(F("/?!\r\n"));
     next_state = (state == STATE_WR_LOGIN
       ? STATE_RD_IDENTIFICATION : STATE_RD_IDENTIFICATION2);
     break;
@@ -370,10 +386,10 @@ void loop()
      * "\ACK 001\r\n" should NAK speed, but go into programming mode,
      * but that doesn't work on the ME-162. */
     if (state == STATE_WR_REQ_DATA_MODE) {
-      iskra_tx(S_ACK "050\r\n"); // 050 = 9600baud + data readout mode
+      iskra_tx(F(S_ACK "050\r\n")); // 050 = 9600baud + data readout mode
       next_state = STATE_RD_DATA_READOUT;
     } else {
-      iskra_tx(S_ACK "051\r\n"); // 051 = 9600baud + programming mode
+      iskra_tx(F(S_ACK "051\r\n")); // 051 = 9600baud + programming mode
       next_state = STATE_RD_PROG_MODE_ACK;
     }
     /* We're assuming here that the speed change does not affect the
@@ -441,7 +457,7 @@ void loop()
   /* #5: Terminate the connection with "\SOH B0\ETX " */
   case STATE_WR_RESTART:
     write_state = state;
-    iskra_tx(S_SOH "B0" S_ETX "q");
+    iskra_tx(F(S_SOH "B0" S_ETX "q"));
     next_state = STATE_WR_LOGIN2;
     break;
 
@@ -450,7 +466,7 @@ void loop()
     write_state = state;
     {
       char buf[16];
-      snprintf(buf, 15, S_SOH "R1" S_STX "%s()" S_ETX, Obis2str(next_obis));
+      snprintf(buf, 15, (S_SOH "R1" S_STX "%s()" S_ETX), Obis2str(next_obis));
       char bcc = din_66219_bcc(buf);
       int pos = strlen(buf);
       buf[pos] = bcc;
@@ -610,7 +626,7 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
     return STATE_WR_RESTART;
 
   case STATE_RD_PROG_MODE_ACK:
-    if (pos >= 6 && memcmp(data, (S_SOH "P0" S_STX "()"), 6) == 0) {
+    if (pos >= 6 && memcmp_cstr(data, (S_SOH "P0" S_STX "()"), 6) == 0) {
       next_obis = OBIS_1_8_0;
       return STATE_WR_REQ_OBIS;
     }
@@ -692,7 +708,7 @@ static void on_response(const char *data, size_t end, Obis obis)
 
   if ((obis == OBIS_1_8_0 || obis == OBIS_2_8_0) && (
         end == 17 && data[0] == '(' && data[8] == '.' &&
-      memcmp(data + 12, "*kWh)", 5) == 0)) {
+      memcmp_cstr(data + 12, "*kWh)", 5) == 0)) {
     unsigned long t = millis();
     long watthour = atol(data + 1) * 1000 + atol(data + 9);
 
@@ -749,10 +765,10 @@ void publish()
 #endif //HAVE_MQTT
 }
 
-static inline void serial_print_cescape(const char *p)
+template<class T> static inline void serial_print_cescape(const T *p)
 {
   char buf[200]; /* watch out, large local variable! */
-  const char *restart = p;
+  const T *restart = p;
   do {
     restart = cescape(buf, restart, 200);
     Serial.print(buf);
@@ -760,7 +776,7 @@ static inline void serial_print_cescape(const char *p)
   Serial.println();
 }
 
-static inline void iskra_tx(const char *p)
+template<class T> static inline void iskra_tx(const T *p)
 {
   /* According to spec, the time between the reception of a message
    * and the transmission of an answer is: between 200ms (or 20ms) and
@@ -853,12 +869,21 @@ static void ensure_mqtt()
  *
  * Returns non-NULL to resume if we stopped because of truncation.
  */
-static const char *cescape(char *buffer, const char *p, size_t maxlen)
+static const char *cescape(
+    char *buffer, const char *p, size_t maxlen, bool progmem)
 {
-  char ch;
+  char ch = '\0';
   char *d = buffer;
   const char *de = d + maxlen - 5;
-  while (d < de && (ch = *p) != '\0') {
+  while (d < de) {
+    if (progmem) {
+      ch = pgm_read_byte(p);
+    } else {
+      ch = *p;
+    }
+    if (ch == '\0') {
+      break;
+    }
     if (ch < 0x20 || ch == '\\' || ch == '\x7f') {
       d[0] = '\\';
       d[4] = ' ';
@@ -896,7 +921,7 @@ static const char *cescape(char *buffer, const char *p, size_t maxlen)
     ++d;
   }
   *d = '\0';
-  return (*p == '\0') ? NULL : p;
+  return (ch == '\0') ? NULL : p;
 }
 
 /**
@@ -939,7 +964,7 @@ static int din_66219_bcc(const char *s)
 static inline Obis str2Obis(const char *key, int keylen)
 {
   for (int i = 0; i < OBIS_LAST; ++i) {
-    if (memcmp(key, Obis_[i], keylen) == 0)
+    if (memcmp_cstr(key, Obis_[i], keylen) == 0)
       return (Obis)i;
   }
   return OBIS_LAST;
@@ -971,7 +996,7 @@ static void parse_data_readout(struct obis_values_t *dst, const char *src)
 
       long lval = atol(value);
       /* "0032826.545*kWh" */
-      if (len == 15 && value[7] == '.' && memcmp(value + 11, "*kWh", 4) == 0) {
+      if (len == 15 && value[7] == '.' && memcmp_cstr(value + 11, "*kWh", 4) == 0) {
         lval = lval * 1000 + atol(value + 8);
       }
       dst->values[i] = lval;
