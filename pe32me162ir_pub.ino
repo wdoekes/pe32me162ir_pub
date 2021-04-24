@@ -173,13 +173,15 @@ enum Obis {
   OBIS_LAST
 };
 
+/* Trick to allow defining an array of PROGMEM strings. */
+typedef struct { char pgm_str[7]; } obis_pgm_t;
 /* Keep in sync with the Obis enum! */
-const char *const Obis_[] = {
-  "C.1.0", "F.F", "0.9.1", "0.9.2", "1.8.0", "2.8.0",
+const obis_pgm_t Obis_[] PROGMEM = {
+  {"C.1.0"}, {"F.F"}, {"0.9.1"}, {"0.9.2"}, {"1.8.0"}, {"2.8.0"},
 #if 0
-  "1.8.1", "1.8.2", "1.8.3", "1.8.4", "2.8.1", "15.8.0",
+  {"1.8.1"}, {"1.8.2"}, {"1.8.3"}, {"1.8.4"}, {"2.8.1"}, {"15.8.0"},
 #endif
-  "UNDEF"
+  {"UNDEF"}
 };
 
 struct obis_values_t {
@@ -198,7 +200,9 @@ static int din_66219_bcc(const char *s);
 /* Convert string to Obis number or OBIS_LAST if not found */
 static inline enum Obis str2Obis(const char *key, int keylen);
 /* Convert Obis string to number */
-inline const char *Obis2str(Obis obis) { return Obis_[obis]; }
+inline const __FlashStringHelper *Obis2str(Obis obis) {
+  return AS_PGM_CSTR(Obis_[obis].pgm_str);
+}
 /* Parse data readout buffer and populate obis_values_t */
 static void parse_data_readout(struct obis_values_t *dst, const char *src);
 
@@ -466,7 +470,15 @@ void loop()
     write_state = state;
     {
       char buf[16];
-      snprintf(buf, 15, (S_SOH "R1" S_STX "%s()" S_ETX), Obis2str(next_obis));
+#if !defined(TEST_BUILD)
+      /* > I used the PSTR() macro instead of F() because snprintf_P() expects
+       * > a regular char pointer and not a const __FlashStringHelper*. */
+      snprintf_P(buf, 15, PSTR(S_SOH "R1" S_STX "%S()" S_ETX),
+          Obis2str(next_obis));
+#else
+      snprintf(buf, 15, (S_SOH "R1" S_STX "%s()" S_ETX),
+          AS_MEM_CSTR(Obis2str(next_obis)));
+#endif
       char bcc = din_66219_bcc(buf);
       int pos = strlen(buf);
       buf[pos] = bcc;
@@ -626,7 +638,7 @@ State on_data_block_or_data_set(char *data, size_t pos, State st)
     return STATE_WR_RESTART;
 
   case STATE_RD_PROG_MODE_ACK:
-    if (pos >= 6 && memcmp_cstr(data, (S_SOH "P0" S_STX "()"), 6) == 0) {
+    if (pos >= 6 && memcmp_P(data, F(S_SOH "P0" S_STX "()"), 6) == 0) {
       next_obis = OBIS_1_8_0;
       return STATE_WR_REQ_OBIS;
     }
@@ -708,7 +720,7 @@ static void on_response(const char *data, size_t end, Obis obis)
 
   if ((obis == OBIS_1_8_0 || obis == OBIS_2_8_0) && (
         end == 17 && data[0] == '(' && data[8] == '.' &&
-      memcmp_cstr(data + 12, "*kWh)", 5) == 0)) {
+        memcmp_P(data + 12, F("*kWh)"), 5) == 0)) {
     unsigned long t = millis();
     long watthour = atol(data + 1) * 1000 + atol(data + 9);
 
@@ -964,7 +976,7 @@ static int din_66219_bcc(const char *s)
 static inline Obis str2Obis(const char *key, int keylen)
 {
   for (int i = 0; i < OBIS_LAST; ++i) {
-    if (memcmp_cstr(key, Obis_[i], keylen) == 0)
+    if (memcmp_P(key, AS_PGM_CSTR(Obis_[i].pgm_str), keylen) == 0)
       return (Obis)i;
   }
   return OBIS_LAST;
@@ -996,7 +1008,8 @@ static void parse_data_readout(struct obis_values_t *dst, const char *src)
 
       long lval = atol(value);
       /* "0032826.545*kWh" */
-      if (len == 15 && value[7] == '.' && memcmp_cstr(value + 11, "*kWh", 4) == 0) {
+      if (len == 15 && value[7] == '.' &&
+          memcmp_P(value + 11, F("*kWh"), 4) == 0) {
         lval = lval * 1000 + atol(value + 8);
       }
       dst->values[i] = lval;
@@ -1011,6 +1024,20 @@ static void parse_data_readout(struct obis_values_t *dst, const char *src)
 #ifdef TEST_BUILD
 static int STR_EQ(const char *func, const char *got, const char *expected)
 {
+  if (strcmp(expected, got) == 0) {
+    printf("OK (%s): \"\"\"%s\"\"\"\n", func, expected);
+    return 1;
+  } else {
+    printf("FAIL (%s): \"\"\"%s\"\"\" != \"\"\"%s\"\"\"\n",
+        func, got, expected);
+    return 0;
+  }
+}
+
+static int FSTR_EQ(
+    const char *func, const __FlashStringHelper *fgot, const char *expected)
+{
+  const char *got = AS_MEM_CSTR(fgot);
   if (strcmp(expected, got) == 0) {
     printf("OK (%s): \"\"\"%s\"\"\"\n", func, expected);
     return 1;
@@ -1078,9 +1105,9 @@ static void test_din_66219_bcc()
 
 static void test_obis()
 {
-  STR_EQ("Obis2str", Obis2str(OBIS_C_1_0), "C.1.0");
-  STR_EQ("Obis2str", Obis2str(OBIS_1_8_0), "1.8.0");
-  STR_EQ("Obis2str", Obis2str(OBIS_2_8_0), "2.8.0");
+  FSTR_EQ("Obis2str", Obis2str(OBIS_C_1_0), "C.1.0");
+  FSTR_EQ("Obis2str", Obis2str(OBIS_1_8_0), "1.8.0");
+  FSTR_EQ("Obis2str", Obis2str(OBIS_2_8_0), "2.8.0");
   INT_EQ("str2Obis", str2Obis("C.1.0", 5), OBIS_C_1_0);
   INT_EQ("str2Obis", str2Obis("1.8.0", 5), OBIS_1_8_0);
   INT_EQ("str2Obis", str2Obis("2.8.0", 5), OBIS_2_8_0);
