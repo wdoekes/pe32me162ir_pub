@@ -226,7 +226,7 @@ extern "C" int strcmp(const char *s1, const char *s2) throw();
 
 static void _test_wattgauge()
 {
-  struct { const char *const tm; unsigned long val; } data[] = {
+  struct { const char *const tm; int val; } data[] = {
     // At t = 0
     {"10:10:07.264", 33130232}, // <- p[0]
     {"10:10:09.223", 33130233},
