@@ -45,6 +45,20 @@
  * - add/standardize first MQTT push (with data_readout and date and time)
  */
 
+/* Helper for PROGMEM/flash strings. */
+#include "progmem.h"
+
+/* In config.h, you should have:
+const char wifi_ssid[] = "<ssid>";
+// Or, even better: DECLARE_PGM_CHAR_P(wifi_ssid, "<ssid>");
+// which stores the string in PROGMEM (irom) instead of SRAM (rodata).
+const char wifi_password[] = "<password>";
+const char mqtt_broker[] = "192.168.1.2";
+const int  mqtt_port = 1883;
+const char mqtt_topic[] = "some/topic";
+*/
+#include "config.h"
+
 /* On the ESP8266, the baud rate needs to be sufficiently high so it
  * doesn't affect the SoftwareSerial. (Probably because this Serial is
  * blocking/serial? 9600 is too low.)
@@ -70,19 +84,10 @@ static const int PIN_IR_TX = 10; // digital pin 10
  * after a new watt hour value."
  * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
  * > the pulse's width is 40 ms. */
-const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
+static const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
 #endif //OPTIONAL_LIGHT_SENSOR
 
-const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
-
-/* In config.h, you should have:
-const char wifi_ssid[] = "<ssid>";
-const char wifi_password[] = "<password>";
-const char mqtt_broker[] = "192.168.1.2";
-const int  mqtt_port = 1883;
-const char mqtt_topic[] = "some/topic";
-*/
-#include "config.h"
+static const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
 
 #include "WattGauge.h"
 
@@ -112,14 +117,7 @@ const char mqtt_topic[] = "some/topic";
 # endif
 #endif
 
-/* Load PROGMEM macro to store global constants in program/flash memory.
- * We define the AS_MEM_CSTR and AS_PGM_CSTR macros to cast the globals
- * back and from a __FlashStringHelper to get some type-safety. */
-#include <avr/pgmspace.h>
-#define AS_MEM_CSTR(x) reinterpret_cast<const char*>(x)
-#define AS_PGM_CSTR(x) reinterpret_cast<const __FlashStringHelper*>(x)
-
-#define VERSION "v3~pre2"
+#define VERSION "v3~pre3"
 
 
 enum State {
@@ -191,17 +189,17 @@ struct obis_values_t {
 /* C-escape, for improved serial monitor readability */
 static const char *cescape(
     char *buffer, const char *p, size_t maxlen, bool progmem = false);
-static inline const __FlashStringHelper *cescape(
-    char *buffer, const __FlashStringHelper *p, size_t maxlen) {
-  return AS_PGM_CSTR(cescape(buffer, AS_MEM_CSTR(p), maxlen, true));
+static inline const pgm_char *cescape(
+    char *buffer, const pgm_char *p, size_t maxlen) {
+  return to_pgm_char_p(cescape(buffer, from_pgm_char_p(p), maxlen, true));
 }
 /* Calculate and (optionally) check block check character (BCC) */
 static int din_66219_bcc(const char *s);
 /* Convert string to Obis number or OBIS_LAST if not found */
 static inline enum Obis str2Obis(const char *key, int keylen);
 /* Convert Obis string to number */
-inline const __FlashStringHelper *Obis2str(Obis obis) {
-  return AS_PGM_CSTR(Obis_[obis].pgm_str);
+inline const pgm_char *Obis2str(Obis obis) {
+  return to_pgm_char_p(Obis_[obis].pgm_str);
 }
 /* Parse data readout buffer and populate obis_values_t */
 static void parse_data_readout(struct obis_values_t *dst, const char *src);
@@ -478,13 +476,15 @@ void loop()
     {
       char buf[16];
 #if !defined(TEST_BUILD)
-      /* > I used the PSTR() macro instead of F() because snprintf_P() expects
-       * > a regular char pointer and not a const __FlashStringHelper*. */
+      /* Type safety is not available for the *_P functions.. Probably
+       * because this is C-compatible. So, we'll use PSTR() instead of F().
+       * PSTR() also puts the string in PROGMEM, but does not cast to the
+       * __FlashStringHelper. */
       snprintf_P(buf, 15, PSTR(S_SOH "R1" S_STX "%S()" S_ETX),
           Obis2str(next_obis));
 #else
       snprintf(buf, 15, (S_SOH "R1" S_STX "%s()" S_ETX),
-          AS_MEM_CSTR(Obis2str(next_obis)));
+          from_pgm_char_p(Obis2str(next_obis)));
 #endif
       char bcc = din_66219_bcc(buf);
       int pos = strlen(buf);
@@ -848,7 +848,9 @@ static void ensure_mqtt()
 {
   mqttClient.poll();
   if (!mqttClient.connected()) {
-    if (mqttClient.connect(mqtt_broker, mqtt_port)) {
+    // NOTE: We use String(mqtt_broker).c_str()) so you can use either
+    // PROGMEM or SRAM strings.
+    if (mqttClient.connect(String(mqtt_broker).c_str(), mqtt_port)) {
       Serial << F("MQTT connected: ") << mqtt_broker << C_ENDL;
     } else {
       Serial << F("MQTT connection to ") << mqtt_broker <<
@@ -958,7 +960,7 @@ static int din_66219_bcc(const char *s)
 static inline Obis str2Obis(const char *key, int keylen)
 {
   for (int i = 0; i < OBIS_LAST; ++i) {
-    if (memcmp_P(key, AS_PGM_CSTR(Obis_[i].pgm_str), keylen) == 0)
+    if (memcmp_P(key, to_pgm_char_p(Obis_[i].pgm_str), keylen) == 0)
       return (Obis)i;
   }
   return OBIS_LAST;
@@ -1003,6 +1005,7 @@ static void parse_data_readout(struct obis_values_t *dst, const char *src)
   }
 }
 
+
 #ifdef TEST_BUILD
 static int STR_EQ(const char *func, const char *got, const char *expected)
 {
@@ -1017,17 +1020,12 @@ static int STR_EQ(const char *func, const char *got, const char *expected)
 }
 
 static int FSTR_EQ(
-    const char *func, const __FlashStringHelper *fgot, const char *expected)
+    const char *func, const pgm_char *fgot, const char *expected)
 {
-  const char *got = AS_MEM_CSTR(fgot);
-  if (strcmp(expected, got) == 0) {
-    printf("OK (%s): \"\"\"%s\"\"\"\n", func, expected);
-    return 1;
-  } else {
-    printf("FAIL (%s): \"\"\"%s\"\"\" != \"\"\"%s\"\"\"\n",
-        func, got, expected);
-    return 0;
-  }
+#ifndef TEST_BUILD
+# error "We treat all pointers equal: don't do this on a microcontroller"
+#endif
+  return STR_EQ(func, from_pgm_char_p(fgot), expected);
 }
 
 static int INT_EQ(const char *func, int got, int expected)
