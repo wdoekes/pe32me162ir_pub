@@ -44,9 +44,9 @@
  * - clean up debug
  * - add/standardize first MQTT push (with data_readout and date and time)
  */
+#include "pe32me162ir_pub.h"
 
-/* Helper for PROGMEM/flash strings. */
-#include "progmem.h"
+#define VERSION "v3~pre3"
 
 /* In config.h, you should have:
 const char wifi_ssid[] = "<ssid>";
@@ -57,7 +57,6 @@ const char mqtt_broker[] = "192.168.1.2";
 const int  mqtt_port = 1883;
 const char mqtt_topic[] = "some/topic";
 */
-#include "config.h"
 
 /* On the ESP8266, the baud rate needs to be sufficiently high so it
  * doesn't affect the SoftwareSerial. (Probably because this Serial is
@@ -88,36 +87,6 @@ static const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
 #endif //OPTIONAL_LIGHT_SENSOR
 
 static const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
-
-#include "WattGauge.h"
-
-/* Include files specific to the platform (ESP8266, Arduino or TEST) */
-#if defined(ARDUINO_ARCH_ESP8266)
-# include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
-# include <SoftwareSerial.h>
-# define HAVE_MQTT
-# define HAVE_WIFI
-#elif defined(ARDUINO_ARCH_AVR)
-# include <Arduino.h> /* Serial, pinMode, INPUT, OUTPUT, ... */
-# include <CustomSoftwareSerial.h>
-# define SoftwareSerial CustomSoftwareSerial
-# define SWSERIAL_7E1 CSERIAL_7E1
-#elif defined(TEST_BUILD)
-# include <Arduino.h>
-# include <SoftwareSerial.h>
-#else
-# error Unsupported platform
-#endif
-
-/* Include files specific to Wifi/MQTT */
-#ifdef HAVE_WIFI
-# include <ESP8266WiFi.h>
-# ifdef HAVE_MQTT
-#  include <ArduinoMqttClient.h>
-# endif
-#endif
-
-#define VERSION "v3~pre3"
 
 
 enum State {
