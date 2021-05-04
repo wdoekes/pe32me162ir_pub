@@ -33,4 +33,6 @@
 
 #include "config.h"
 
+#include "arduino_secrets.h"
+
 #endif //INCLUDED_PE32ME162IR_PUB_H
