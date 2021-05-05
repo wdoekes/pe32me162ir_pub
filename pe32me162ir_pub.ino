@@ -22,7 +22,10 @@
  * - Connect the pins as specified above and below (PIN_IR_RX, PIN_IR_TX);
  * - connect the IR-tranceiver to the ISKA ME-162, with _our_ TX on the left
  *   and _our_ RX on the right;
- * - create a config.h next to this file (see below, at #include "config.h").
+ * - Copy config.h.example to config.h and adapt it to your situation and
+ *   preferences.
+ * - Copy arduino_secrets.h.example to arduino_secrets.h and fill in your
+ *   credentials and MQTT information.
  *
  * ISKRA ME-162 electricity meter notes:
  * > The optical port complies with the IEC 62056-21 (IEC
@@ -48,16 +51,6 @@
 
 #define VERSION "v3~pre3"
 
-/* In config.h, you should have:
-const char wifi_ssid[] = "<ssid>";
-// Or, even better: DECLARE_PGM_CHAR_P(wifi_ssid, "<ssid>");
-// which stores the string in PROGMEM (irom) instead of SRAM (rodata).
-const char wifi_password[] = "<password>";
-const char mqtt_broker[] = "192.168.1.2";
-const int  mqtt_port = 1883;
-const char mqtt_topic[] = "some/topic";
-*/
-
 /* On the ESP8266, the baud rate needs to be sufficiently high so it
  * doesn't affect the SoftwareSerial. (Probably because this Serial is
  * blocking/serial? 9600 is too low.)
@@ -73,21 +66,17 @@ static const int PIN_IR_RX = 9;  // digital pin 9
 static const int PIN_IR_TX = 10; // digital pin 10
 #endif
 
-/* You can #define OPTIONAL_LIGHT_SENSOR in config.h */
+DECLARE_PGM_CHAR_P(wifi_ssid, SECRET_WIFI_SSID);
+DECLARE_PGM_CHAR_P(wifi_password, SECRET_WIFI_PASS);
+DECLARE_PGM_CHAR_P(mqtt_broker, SECRET_MQTT_BROKER);
+static const int mqtt_port = SECRET_MQTT_PORT;
+DECLARE_PGM_CHAR_P(mqtt_topic, SECRET_MQTT_TOPIC);
+
 #ifdef OPTIONAL_LIGHT_SENSOR
-/* Optionally, you may attach a light sensor diode (or photo transistor
- * or whatever) to analog pin A0 and have it monitor the red watt hour
- * pulse LED. This improves the current Watt calculation when the power
- * consumption is low. A pulse causes the sleep to be cut short,
- * increasing the possibility that two consecutive readings are "right
- * after a new watt hour value."
- * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
- * > the pulse's width is 40 ms. */
 static const int PULSE_THRESHOLD = 100;  // analog value between 0 and 1023
 #endif //OPTIONAL_LIGHT_SENSOR
 
 static const int STATE_CHANGE_TIMEOUT = 15; // reset state after 15s of no change
-
 
 enum State {
   STATE_WR_LOGIN = 0,
@@ -659,7 +648,9 @@ void on_data_readout(const char *data, size_t /*end*/)
   // the DATA bit (FIXME).
   // FIXME: NOTE: This is limited to 256 chars in MqttClient.cpp
   // (TX_PAYLOAD_BUFFER_SIZE).
-  mqttClient.beginMessage(mqtt_topic);
+  // NOTE: We use String(mqtt_topic).c_str()) so you can use either
+  // PROGMEM or SRAM strings.
+  mqttClient.beginMessage(String(mqtt_topic).c_str());
   mqttClient.print(F("device_id="));
   mqttClient.print(guid);
   // FIXME: move identification to another message; the one where we
@@ -715,7 +706,9 @@ void publish()
 
 #ifdef HAVE_MQTT
   // Use simple application/x-www-form-urlencoded format.
-  mqttClient.beginMessage(mqtt_topic);
+  // NOTE: We use String(mqtt_topic).c_str()) so you can use either
+  // PROGMEM or SRAM strings.
+  mqttClient.beginMessage(String(mqtt_topic).c_str());
   mqttClient.print(F("device_id="));
   mqttClient.print(guid);
   mqttClient.print(F("&e_pos_act_energy_wh="));
