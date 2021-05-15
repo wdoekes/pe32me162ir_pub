@@ -1,4 +1,3 @@
-//#define OPTIONAL_LIGHT_SENSOR
 /* Optionally, if you define OPTIONAL_LIGHT_SENSOR, you may attach a light
  * sensor diode (or photo transistor or whatever) to analog pin A0 and have it
  * monitor the red watt hour pulse LED. This improves the current Watt
@@ -7,3 +6,4 @@
  * "right after a new watt hour value."
  * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
  * > the pulse's width is 40 ms. */
+//#define OPTIONAL_LIGHT_SENSOR
