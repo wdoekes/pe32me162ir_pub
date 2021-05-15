@@ -29,10 +29,15 @@
 /* Helper for PROGMEM/flash strings. */
 #include "progmem.h"  // possibly used in config.h
 
-#include "WattGauge.h"
-
 #include "config.h"
 
 #include "arduino_secrets.h"
+
+#ifdef OPTIONAL_PINGMON
+# include "PingMon.h"
+# include "PingMonUtil.h"
+#endif
+
+#include "WattGauge.h"
 
 #endif //INCLUDED_PE32ME162IR_PUB_H

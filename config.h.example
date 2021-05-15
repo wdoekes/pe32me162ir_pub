@@ -14,3 +14,14 @@
  * > In the meter mode it [...] blinks with a pulse rate of 1000 imp/kWh,
  * > the pulse's width is 40 ms. */
 //#define OPTIONAL_LIGHT_SENSOR
+
+/* Optionally, if you define OPTIONAL_PINGMON, a pinging module will be
+ * loaded from https://github.com/wdoekes/pe32ping_mod that pings
+ * various hosts and posts the result to the broker as well. */
+//#define OPTIONAL_PINGMON
+//DECLARE_PGM_CHAR_P(pingmon_host0, "example.com");
+//DECLARE_PGM_CHAR_P(pingmon_host1, "example2.com");
+//DECLARE_PGM_CHAR_P(pingmon_host2, "example3.com");
+//DECLARE_PGM_CHAR_P(pingmon_whatsmyip_url, "http://ifconfig.co");
+
+/* vim: set syn=c: */

@@ -49,7 +49,7 @@
  */
 #include "pe32me162ir_pub.h"
 
-#define VERSION "v3~pre3"
+#define VERSION "v3~pre3+pingmon"
 
 /* On the ESP8266, the baud rate needs to be sufficiently high so it
  * doesn't affect the SoftwareSerial. (Probably because this Serial is
@@ -193,6 +193,12 @@ static void on_response(const char *data, size_t end, Obis obis);
 
 static void publish();
 
+#ifdef OPTIONAL_PINGMON
+static void pingmon_init();
+static void pingmon_update();
+static void pingmon_publish();
+#endif
+
 /* ASCII control codes */
 const char C_SOH = '\x01';
 #define    S_SOH   "\x01"
@@ -278,6 +284,10 @@ Obis next_obis;
 EnergyGauge gauge; /* feed it 1.8.0 and 2.8.0, get 1.7.0 and 2.7.0 */
 unsigned long last_publish;
 
+#ifdef OPTIONAL_PINGMON
+static PingMon pingmon;
+#endif
+
 
 void setup()
 {
@@ -315,6 +325,10 @@ void setup()
   // Initial values
   state = next_state = STATE_WR_LOGIN;
   last_statechange = last_publish = millis();
+
+#ifdef OPTIONAL_PINGMON
+  pingmon_init();
+#endif
 }
 
 void loop()
@@ -514,6 +528,13 @@ void loop()
 
   /* Continuous: just sleep a slight bit */
   case STATE_SLEEP:
+#ifdef OPTIONAL_PINGMON
+    /* This is SLOW. It takes up up to 1500ms because it waits for the
+     * ping response as well (for up to 1000ms). Note that it generally
+     * is a lot quicker, especially when it concludes that no work has
+     * to be done. */
+    pingmon_update();
+#endif
 #ifdef OPTIONAL_LIGHT_SENSOR
     /* This is a mashup between simply doing the poll-for-new-totals
      * every second, and only-a-poll-after-pulse:
@@ -843,7 +864,7 @@ static void ensure_mqtt()
     }
   }
 }
-#endif //HAVE_MQTT
+#endif //HAVE_MQTT /* and HAVE_WIFI */
 
 /**
  * C-escape, for improved serial monitor readability
@@ -991,6 +1012,94 @@ static void parse_data_readout(struct obis_values_t *dst, const char *src)
 }
 
 
+#ifdef OPTIONAL_PINGMON
+static inline bool str_non_zero(const char *p) { return p && *p != '\0'; }
+static inline bool str_non_zero(const pgm_char *p) {
+  return str_non_zero(from_pgm_char_p(p));
+}
+
+static void pingmon_init()
+{
+  /* Internal gateway */
+  pingmon.addTarget("gw.int", []() {
+#ifdef HAVE_WIFI
+    return WiFi.gatewayIP().toString();
+#else
+    return String("192.168.1.1");
+#endif
+  });
+  /* Fetch external IP from whatsmyip/ifconfig.co service */
+  pingmon.addTarget("ip.ext", []() {
+    return pingmon_util_http_whatsmyip(pingmon_whatsmyip_url);
+  });
+  /* Fetch external Gateway, by replacing last octet of my IP with ".1" */
+  pingmon.addTarget("gw.ext", []() {
+    String ret = pingmon_util_http_whatsmyip(pingmon_whatsmyip_url);
+    int pos = ret.lastIndexOf('.'); // take last '.'
+    if (pos > 0) { ret.remove(pos + 1); ret += "1"; /* => x.x.x.1 */ }
+    return ret;
+  });
+  /* Take Cloudflare DNS */
+  pingmon.addTarget("dns.cfl", "1.1.1.1");
+  /* Take Google DNS */
+  pingmon.addTarget("dns.ggl", "8.8.8.8");
+  if (str_non_zero(pingmon_host0)) {
+    pingmon.addTarget("host.0", pingmon_host0);
+  }
+  if (str_non_zero(pingmon_host1)) {
+    pingmon.addTarget("host.1", pingmon_host1);
+  }
+  if (str_non_zero(pingmon_host2)) {
+    pingmon.addTarget("host.2", pingmon_host2);
+  }
+  pingmon.setPublish(pingmon_publish);
+}
+
+static void pingmon_update()
+{
+  pingmon.update();
+}
+
+static void pingmon_publish()
+{
+  ensure_wifi();
+  ensure_mqtt();
+
+#ifdef HAVE_MQTT
+  // Use simple application/x-www-form-urlencoded format.
+  mqttClient.beginMessage(mqtt_topic);
+  mqttClient.print(F("device_id="));
+  mqttClient.print(guid);
+#endif
+
+  for (unsigned i = 0; i < pingmon.getTargetCount(); ++i) {
+    PingTarget& tgt = pingmon.getTarget(i);
+    const PingStats& st = tgt.getStats();
+    Serial << F("pushing ping: ") << tgt.getId() <<
+      F("=") << st.responseTimeMs;
+    if (st.loss) {
+      Serial << F("/") << (unsigned)st.loss;
+    }
+    Serial << C_ENDL;
+#ifdef HAVE_MQTT
+    mqttClient.print("&ping.");
+    mqttClient.print(tgt.getId());
+    mqttClient.print("=");
+    mqttClient.print(st.responseTimeMs);
+    if (st.loss) {
+      mqttClient.print("/");
+      mqttClient.print((unsigned)st.loss);
+    }
+#endif
+  }
+
+#ifdef HAVE_MQTT
+  mqttClient.endMessage();
+#endif
+}
+#endif //OPTIONAL_PINGMON
+
+
 #ifdef TEST_BUILD
 static int STR_EQ(const char *func, const char *got, const char *expected)
 {
@@ -1122,6 +1231,10 @@ int main()
 //  printf("%ld - %ld - %ld\n",
 //    lastValue[OBIS_1_8_0], deltaValue[OBIS_1_8_0], deltaTime[OBIS_1_8_0]);
   publish();
+#ifdef OPTIONAL_PINGMON
+  pingmon_init();
+  pingmon_publish();
+#endif
   return 0;
 }
 #endif //TEST_BUILD
