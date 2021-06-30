@@ -49,7 +49,7 @@
  */
 #include "pe32me162ir_pub.h"
 
-#define VERSION "v3~pre3+pingmon"
+#define VERSION "v3~pre4+pingmon-2021-06-30a"
 
 /* On the ESP8266, the baud rate needs to be sufficiently high so it
  * doesn't affect the SoftwareSerial. (Probably because this Serial is
@@ -763,6 +763,7 @@ void publish()
   mqttClient.print(gauge.get_instantaneous_power());
   mqttClient.print(F("&dbg_uptime="));
   mqttClient.print(millis());
+  mqttClient.print(F("&dbg_version=" VERSION));
 #ifdef OPTIONAL_LIGHT_SENSOR
   mqttClient.print(F("&dbg_pulse="));
   mqttClient.print(pulse_low);
@@ -1033,12 +1034,14 @@ static void pingmon_init()
     return pingmon_util_http_whatsmyip(pingmon_whatsmyip_url);
   });
   /* Fetch external Gateway, by replacing last octet of my IP with ".1" */
+#if 0
   pingmon.addTarget("gw.ext", []() {
     String ret = pingmon_util_http_whatsmyip(pingmon_whatsmyip_url);
     int pos = ret.lastIndexOf('.'); // take last '.'
     if (pos > 0) { ret.remove(pos + 1); ret += "1"; /* => x.x.x.1 */ }
     return ret;
   });
+#endif
   /* Take Cloudflare DNS */
   pingmon.addTarget("dns.cfl", "1.1.1.1");
   /* Take Google DNS */
