@@ -1,36 +1,58 @@
 pe32me162ir_pub
 ===============
 
-Project Energy 32: *Talk to ISKRA ME162 through optical port, export to MQTT.*
+**Project Energy 32:** *Read electricity meter (ISKRA ME162), through
+optical port, export power usage using MQTT.*
 
-On the `Hal9k Kamstrup Project page
-<https://wiki.hal9k.dk/projects/kamstrup>`_ (by Aalborg hackers) you can
-find instructions to build an *optical probe* (infrared transceiver) to
-communicate with *Kamstrup electricity meters* using the optical
-communications port. Such an optical communication port is available on
-several other electricity meters, like the *ISKRA ME-162* commonly found
-in the Netherlands. This optical probe can also be used on those.
+This project contains *C* code to read values from the *ISKRA ME-162
+electricity meter* using an *ESP8622* (or *Arduino*) and push them to an
+*MQTT broker*.
 
-This project contains Arduino/ESP8266 code to read values from the
-*ISKRA ME-162 electricity meter* and push them to an MQTT broker.
+(There is also a *Python* version of this project at `pe32me162irpy_pub
+<https://github.com/wdoekes/pe32me162irpy_pub>`_.)
+
+Features:
+
+- Although the *ISKA ME162* does not include power readouts (in Watt), we
+  query the total energy consumed/produced (in Watt-hour) every second
+  or so. This allows us to get a fair estimate of instantanous power
+  usage. This can in fact give a better estimate than just sampling
+  instantaneous power every now and then (which would be possible on other
+  meters).
+
+Required hardware: a so-called optical probe.
+
+- *2023* - Bret McGee offers pre-soldered *optical probes* at `ebay UK
+  <https://www.ebay.co.uk/itm/204371156344>`_. You'll likely want to 3D
+  print a `plastic cover <https://www.thingiverse.com/thing:2652216>`_
+  with magnets for easy attachment to your meter.
+
+  *(I've been told Aalborg hackers stopped shipping their packages:
+  "Bemærk: Vi sælger ikke længere kits.")*
+
+- *2021* - On the `Hal9k Kamstrup Project page
+  <https://wiki.hal9k.dk/projects/kamstrup>`_ (by Aalborg hackers) you can
+  find instructions to build an *optical probe* (infrared transceiver) to
+  communicate with *Kamstrup electricity meters* using the optical
+  communications port. Such an optical communication port is available on
+  several other electricity meters, like the *ISKRA ME-162* commonly found
+  in the Netherlands. This optical probe can also be used on those.
 
 
+-----
 HOWTO
 -----
 
-1.  First, you order the probe kit from the Danes: on their `project page
-    <https://wiki.hal9k.dk/projects/kamstrup>`_ they describe the
-    contents and how to order.
+1.  First, you order the soldered probe from `Bret on ebay UK
+    <https://www.ebay.co.uk/itm/204371156344>`_ and 3D print the cover.
 
-    .. image:: assets/kamstrupkitv2.jpg
-
-2.  Second, you solder the components together. Again, refer to the
-    *Kamstrup Project page*.
-
-    **BEWARE: The images on their page actually have the two BC547
+    **BEWARE: If you're doing a solder based on the Kamstrup images,
+    know that the images on their page actually have the two BC547
     transistors depicted in reverse. If you look at the diagram, you'll
     find they should be rotated 180 degrees, with the Collectors
     connected to the 10k resistors.**
+
+    .. image:: assets/kamstrupkitv2.jpg
 
     .. image:: assets/kamstrup-diagram-as-png.png
 
@@ -47,7 +69,7 @@ HOWTO
     *(gently inserting the magnets into the plastic shell, after
     widening the openings a bit)*
 
-3.  Third, you test that the infrared transmitter works, by attaching it
+2.  Second, you test that the infrared transmitter works, by attaching it
     to an Arduino or similar, and running something like this:
 
     .. code-block:: c
@@ -78,7 +100,7 @@ HOWTO
 
     .. image:: assets/pe32-ir-test-tx.gif
 
-4.  Fourth, you check that the infrared reception works. Run the
+3.  Third, you check that the infrared reception works. Run the
     following code:
 
     .. code-block:: c
@@ -127,12 +149,8 @@ After hooking everything up, your meter cupboard might look like this:
 
 .. image:: assets/pe32-meter-cupboard.png
 
-*Note that setting up a MQTT broker and a subscriber for the pushed data
-is beyond the scope of this HOWTO. Personally, I use Mosquitto (broker),
-a custom subscriber, PostgreSQL (with timescale) and Grafana for
-visualisation.*
 
-
+-------------
 MQTT messages
 -------------
 
@@ -159,6 +177,7 @@ Where the keys mean:
 - e_inst_power_w (16.7.0) = Sum of active instantaneous power [Watt]
 
 
+-------------
 Local testing
 -------------
 
@@ -180,6 +199,7 @@ Now you can run ``make`` to run some test code::
     ...
 
 
+-----------------------------
 The issue with the odd spikes
 -----------------------------
 
@@ -228,3 +248,11 @@ Now the new graph is more in line with the "old" counter (which was
 still in use last week) which `read the LED pulses
 <https://github.com/wdoekes/pe32me162led_pub>`_ to indicate power
 consumption.
+
+----
+
+*Project energy 32* is a suite of personal home readout/automation
+tools. Batteries are *not* included. You need to set up an *MQTT
+broker*, a database to store the readouts, a backend that subscribes and
+inserts the values, vacuuming/pruning code, and something to display the
+values (like *Grafana*).
