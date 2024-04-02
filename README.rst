@@ -73,6 +73,7 @@ HOWTO
     to an Arduino or similar, and running something like this:
 
     .. code-block:: c
+        :force:
 
         const int PIN_TX = 10;
         const int PIN_LED = 13;
