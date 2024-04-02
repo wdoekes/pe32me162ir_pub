@@ -72,7 +72,7 @@ HOWTO
 2.  Second, you test that the infrared transmitter works, by attaching it
     to an Arduino or similar, and running something like this:
 
-    .. code::
+    .. code-block:: c
 
         const int PIN_TX = 10;
         const int PIN_LED = 13;
